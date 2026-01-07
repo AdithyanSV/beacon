@@ -5,6 +5,8 @@ Implements intelligent scanning that adjusts frequency based on:
 - Network state (no devices, finding devices, stable network)
 - Connection status
 - Discovery success rate
+
+Fixed: Deduplication now happens in the callback to avoid duplicate processing.
 """
 
 import asyncio
@@ -25,6 +27,9 @@ from bluetooth.constants import (
     DiscoveryState,
     BluetoothConstants,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class NetworkState(Enum):
@@ -52,6 +57,9 @@ class DeviceDiscovery:
     
     Adjusts scan frequency based on network conditions to optimize
     battery usage and discovery speed.
+    
+    Fixed: Deduplication happens in the scan callback to avoid
+    processing the same device multiple times per scan.
     """
     
     def __init__(self, bluetooth_manager=None):
@@ -59,10 +67,13 @@ class DeviceDiscovery:
         self._state = DiscoveryState.IDLE
         self._network_state = NetworkState.NO_DEVICES
         
-        # Device tracking
+        # Device tracking - with proper deduplication
         self._discovered_devices: Dict[str, DeviceInfo] = {}
         self._app_devices: Set[str] = set()  # Devices running our app
         self._device_lock = asyncio.Lock()
+        
+        # Track devices seen in current scan (for deduplication)
+        self._current_scan_devices: Set[str] = set()
         
         # Statistics
         self._stats = DiscoveryStats()
@@ -110,6 +121,7 @@ class DeviceDiscovery:
         self._running = True
         self._state = DiscoveryState.SCANNING
         self._scan_task = asyncio.create_task(self._scan_loop())
+        logger.info("Device discovery started")
     
     async def stop(self) -> None:
         """Stop the discovery service."""
@@ -128,109 +140,116 @@ class DeviceDiscovery:
                 await self._scanner.stop()
             except Exception:
                 pass
+        
+        logger.info("Device discovery stopped")
     
     async def scan_once(self, timeout: float = None) -> List[DeviceInfo]:
         """
         Perform a single scan operation.
         
-        Args:
-            timeout: Scan timeout in seconds.
-            
-        Returns:
-            List of discovered devices.
+        Fixed: Deduplication now happens in the callback to avoid
+        logging and processing the same device multiple times.
         """
         timeout = timeout or BluetoothConstants.DEFAULT_SCAN_TIMEOUT
-        discovered = []
         
-        def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
-            """Handle device detection."""
-            # IMPORTANT: Don't filter by service UUID initially - discover ALL devices
-            # We'll verify if it's an app device after connection attempt
+        # Reset current scan tracking
+        self._current_scan_devices.clear()
+        new_devices_this_scan: List[DeviceInfo] = []
+        
+        async def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
+            """
+            Handle device detection - with proper deduplication.
+            
+            This callback fires for EVERY advertisement packet, including
+            RSSI updates. We only want to process each device ONCE per scan.
+            """
+            address = device.address
+            
+            # Skip if already seen in this scan (deduplication)
+            if address in self._current_scan_devices:
+                return
+            
+            self._current_scan_devices.add(address)
+            
+            # Check if this is an app device (advertising our service UUID)
             is_app_device = self._is_app_device(device, advertisement_data)
             
             device_info = DeviceInfo(
-                address=device.address,
+                address=address,
                 name=device.name or advertisement_data.local_name,
                 rssi=advertisement_data.rssi,
                 state=ConnectionState.DISCONNECTED,
             )
             device_info.update_seen()
-            discovered.append((device_info, is_app_device))
+            
+            # Check if this is a new device overall
+            async with self._device_lock:
+                is_new_device = address not in self._discovered_devices
+                
+                if is_new_device:
+                    self._discovered_devices[address] = device_info
+                    logger.info(f"🆕 NEW DEVICE: {address} | {device_info.name or 'Unknown'} | RSSI: {device_info.rssi} | App: {is_app_device}")
+                    new_devices_this_scan.append(device_info)
+                    
+                    # Track app devices
+                    if is_app_device:
+                        self._app_devices.add(address)
+                        logger.info(f"✅ APP DEVICE IDENTIFIED: {address}")
+                        if self._on_app_device_found:
+                            asyncio.create_task(self._safe_callback(self._on_app_device_found, device_info))
+                    
+                    # Notify general device found callback
+                    if self._on_device_found:
+                        asyncio.create_task(self._safe_callback(self._on_device_found, device_info))
+                else:
+                    # Update existing device info
+                    existing = self._discovered_devices[address]
+                    existing.rssi = device_info.rssi
+                    existing.update_seen()
+                    
+                    # Check if it became an app device
+                    if is_app_device and address not in self._app_devices:
+                        self._app_devices.add(address)
+                        logger.info(f"✅ EXISTING DEVICE NOW IDENTIFIED AS APP: {address}")
+                        if self._on_app_device_found:
+                            asyncio.create_task(self._safe_callback(self._on_app_device_found, existing))
         
         try:
             self._stats.total_scans += 1
             self._stats.last_scan_time = time.time()
             
-            from utils.logger import get_logger
-            logger = get_logger(__name__)
-            logger.info(f"🔍 Starting BLE scan (timeout: {timeout}s)")
-            logger.debug(f"Scan #{self._stats.total_scans} - Discovery state: {self._state.name}, Network state: {self._network_state.name}")
+            logger.info(f"🔍 Starting BLE scan #{self._stats.total_scans} (timeout: {timeout}s)")
             
             scanner = BleakScanner(detection_callback=detection_callback)
             await scanner.start()
-            logger.debug("✅ BLE scanner started successfully, waiting for devices...")
             await asyncio.sleep(timeout)
             await scanner.stop()
-            logger.info(f"📡 BLE scan completed - Found {len(discovered)} device(s) in callback")
             
-            # Process discovered devices
-            devices_found = []
-            from utils.logger import get_logger
-            logger = get_logger(__name__)
+            # Log results
+            unique_devices_seen = len(self._current_scan_devices)
+            new_count = len(new_devices_this_scan)
             
             async with self._device_lock:
-                logger.debug(f"Processing {len(discovered)} discovered device(s)...")
-                for device_info, is_app_device in discovered:
-                    address = device_info.address
-                    name = device_info.name or "Unknown"
-                    rssi = device_info.rssi or "N/A"
-                    
-                    # Check if this is a new device
-                    is_new = address not in self._discovered_devices
-                    
-                    if is_new:
-                        logger.info(f"🆕 NEW DEVICE FOUND: {address} | Name: {name} | RSSI: {rssi} | App Device: {is_app_device}")
-                    else:
-                        logger.debug(f"📱 Device seen again: {address} | RSSI: {rssi}")
-                    
-                    # Update device cache
-                    if address in self._discovered_devices:
-                        # Update existing device
-                        existing = self._discovered_devices[address]
-                        existing.rssi = device_info.rssi
-                        existing.update_seen()
-                        device_info = existing
-                    else:
-                        self._discovered_devices[address] = device_info
-                    
-                    # Track app devices
-                    if is_app_device:
-                        self._app_devices.add(address)
-                        logger.info(f"✅ App device identified: {address}")
-                        if is_new and self._on_app_device_found:
-                            logger.info(f"🔔 Triggering app device found callback for {address}")
-                            await self._safe_callback(self._on_app_device_found, device_info)
-                    
-                    # Notify general device found
-                    if is_new and self._on_device_found:
-                        logger.info(f"🔔 Triggering device found callback for {address}")
-                        await self._safe_callback(self._on_device_found, device_info)
-                    
-                    devices_found.append(device_info)
+                total_known = len(self._discovered_devices)
+                app_count = len(self._app_devices)
+            
+            logger.info(f"📡 Scan complete: {unique_devices_seen} unique devices seen, {new_count} new")
+            logger.info(f"📊 Total known: {total_known} | App devices: {app_count}")
             
             # Update statistics
-            if devices_found:
+            if new_devices_this_scan:
                 self._stats.successful_scans += 1
-                self._stats.devices_found += len(devices_found)
+                self._stats.devices_found += new_count
                 self._stats.last_device_found_time = time.time()
                 self._stats.consecutive_empty_scans = 0
             else:
-                self._stats.consecutive_empty_scans += 1
+                if unique_devices_seen == 0:
+                    self._stats.consecutive_empty_scans += 1
             
             # Update network state and interval
             await self._update_network_state()
             
-            return devices_found
+            return new_devices_this_scan
             
         except BleakError as e:
             raise BluetoothDiscoveryError(f"Scan failed: {e}")
@@ -246,7 +265,6 @@ class DeviceDiscovery:
         if not advertisement_data.service_uuids:
             return False
         
-        # Check if our service UUID is advertised
         target_uuid = BluetoothConstants.SERVICE_UUID.lower()
         for uuid in advertisement_data.service_uuids:
             if uuid.lower() == target_uuid:
@@ -262,37 +280,15 @@ class DeviceDiscovery:
     
     async def _scan_loop(self) -> None:
         """Main scan loop with adaptive intervals."""
-        from utils.logger import get_logger
-        logger = get_logger(__name__)
-        
-        logger.info("🚀 Discovery scan loop started")
-        logger.info(f"📊 Initial scan interval: {self._current_interval:.1f}s")
-        scan_count = 0
+        logger.info(f"🚀 Discovery scan loop started (interval: {self._current_interval:.1f}s)")
         
         while self._running:
             try:
-                scan_count += 1
-                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-                logger.info(f"🔍 SCAN #{scan_count} | Interval: {self._current_interval:.1f}s | State: {self._state.name}")
-                
                 # Perform scan
-                devices = await self.scan_once()
-                
-                if devices:
-                    logger.info(f"✅ Scan #{scan_count} COMPLETE: Found {len(devices)} device(s)")
-                    for device in devices:
-                        logger.info(f"   📱 {device.address} | {device.name or 'Unknown'} | RSSI: {device.rssi}")
-                else:
-                    logger.info(f"⚠️ Scan #{scan_count} COMPLETE: No devices found")
+                await self.scan_once()
                 
                 # Check for lost devices
                 await self._check_lost_devices()
-                
-                # Log statistics
-                async with self._device_lock:
-                    total_devices = len(self._discovered_devices)
-                    app_devices = len(self._app_devices)
-                    logger.info(f"📊 STATS: Total discovered: {total_devices} | App devices: {app_devices} | Empty scans: {self._stats.consecutive_empty_scans}")
                 
                 # Wait for next scan
                 await asyncio.sleep(self._current_interval)
@@ -335,16 +331,12 @@ class DeviceDiscovery:
         
         # Adjust scan interval based on network state
         if self._network_state == NetworkState.NO_DEVICES:
-            # No devices - use balanced interval
             target_interval = Config.bluetooth.DISCOVERY_INTERVAL_NO_DEVICES
         elif self._network_state == NetworkState.DISCOVERING:
-            # Finding devices - scan more frequently
             target_interval = Config.bluetooth.DISCOVERY_INTERVAL_INITIAL
         elif self._network_state == NetworkState.MODERATE:
-            # Some connections - moderate interval
             target_interval = Config.bluetooth.DISCOVERY_INTERVAL_MODERATE
         else:
-            # Stable network - scan less frequently
             target_interval = Config.bluetooth.DISCOVERY_INTERVAL_STABLE
         
         # Adjust based on consecutive empty scans
@@ -374,6 +366,7 @@ class DeviceDiscovery:
         
         # Notify callbacks
         for device in lost_devices:
+            logger.info(f"📴 Device lost: {device.address}")
             if self._on_device_lost:
                 await self._safe_callback(self._on_device_lost, device)
     
@@ -414,8 +407,8 @@ class DeviceDiscovery:
             result = callback(*args)
             if asyncio.iscoroutine(result):
                 await result
-        except Exception:
-            pass  # Don't let callback errors crash discovery
+        except Exception as e:
+            logger.error(f"Error in callback: {e}")
     
     def force_scan(self) -> None:
         """Force an immediate scan by resetting interval."""
@@ -426,3 +419,4 @@ class DeviceDiscovery:
         async with self._device_lock:
             self._discovered_devices.clear()
             self._app_devices.clear()
+        logger.info("Discovery cache cleared")

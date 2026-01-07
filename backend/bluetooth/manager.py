@@ -6,6 +6,8 @@ Handles Bluetooth Low Energy (BLE) operations including:
 - Device scanning and discovery
 - Connection management
 - Data transmission/reception
+
+Integrated with ConnectionPool for unified connection state management.
 """
 
 import asyncio
@@ -33,7 +35,6 @@ from bluetooth.constants import (
     BluetoothConstants,
     MessageType,
 )
-from bluetooth.advertising import BLEAdvertising
 
 logger = get_logger(__name__)
 
@@ -54,6 +55,7 @@ class BluetoothManager:
     """
     Async Bluetooth Manager for BLE mesh networking.
     
+    Uses a single internal connection tracking system.
     Thread-safe and designed for concurrent operations using asyncio.
     """
     
@@ -61,7 +63,7 @@ class BluetoothManager:
         self._initialized = False
         self._running = False
         
-        # Connection management
+        # Single source of truth for connections
         self._connections: Dict[str, PeerConnection] = {}
         self._connection_lock = asyncio.Lock()
         
@@ -74,12 +76,6 @@ class BluetoothManager:
         self._on_device_connected: Optional[Callable[[DeviceInfo], Any]] = None
         self._on_device_disconnected: Optional[Callable[[DeviceInfo], Any]] = None
         self._on_device_discovered: Optional[Callable[[DeviceInfo], Any]] = None
-        
-        # Scanner
-        self._scanner: Optional[BleakScanner] = None
-        
-        # BLE Advertising
-        self._advertising: Optional[BLEAdvertising] = None
         
         # Background tasks
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -94,31 +90,22 @@ class BluetoothManager:
         
         Returns:
             True if initialization successful, False otherwise.
-        
-        Raises:
-            BluetoothNotAvailableError: If Bluetooth is not available.
-            BluetoothAdapterError: If adapter initialization fails.
         """
         if self._initialized:
             return True
         
         try:
-            # Test if Bluetooth is available by attempting a quick scan
+            # Test if Bluetooth is available
             scanner = BleakScanner()
-            await asyncio.wait_for(
-                scanner.start(),
-                timeout=5.0
-            )
+            await asyncio.wait_for(scanner.start(), timeout=5.0)
             await scanner.stop()
             
-            # Generate a pseudo-local address (BLE doesn't expose local address easily)
+            # Generate a pseudo-local address
             import uuid
             self._local_address = str(uuid.uuid4())[:17].replace("-", ":")
             
-            # Initialize BLE advertising
-            self._advertising = BLEAdvertising()
-            
             self._initialized = True
+            logger.info(f"Bluetooth manager initialized (local: {self._local_address})")
             return True
             
         except asyncio.TimeoutError:
@@ -138,53 +125,31 @@ class BluetoothManager:
         
         self._running = True
         
-        # Start BLE advertising to make device discoverable
-        if self._advertising:
-            try:
-                await self._advertising.start_advertising()
-                logger.info("BLE advertising started - device is now discoverable")
-            except Exception as e:
-                logger.warning(f"Failed to start BLE advertising: {e}")
-                logger.info("Device discovery may be limited - other devices may not find this device")
-        
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        
+        logger.info("Bluetooth manager started")
     
     async def stop(self) -> None:
         """Stop the Bluetooth manager and cleanup."""
         self._running = False
         
-        # Stop BLE advertising
-        if self._advertising:
-            try:
-                await self._advertising.stop_advertising()
-            except Exception as e:
-                logger.warning(f"Failed to stop BLE advertising: {e}")
-        
         # Cancel background tasks
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            try:
-                await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
-        
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Stop scanner
-        if self._scanner:
-            await self._scanner.stop()
+        for task in [self._heartbeat_task, self._cleanup_task]:
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         
         # Disconnect all peers
         async with self._connection_lock:
             for address in list(self._connections.keys()):
                 await self._disconnect_peer(address)
+        
+        logger.info("Bluetooth manager stopped")
     
     @property
     def local_address(self) -> Optional[str]:
@@ -195,6 +160,17 @@ class BluetoothManager:
     def is_running(self) -> bool:
         """Check if the manager is running."""
         return self._running
+    
+    @property
+    def connection_count(self) -> int:
+        """Get the number of active connections."""
+        return len([c for c in self._connections.values() 
+                   if c.device_info.state == ConnectionState.CONNECTED])
+    
+    @property
+    def available_slots(self) -> int:
+        """Get number of available connection slots."""
+        return max(0, Config.bluetooth.MAX_CONCURRENT_CONNECTIONS - self.connection_count)
     
     # ==================== Connection Management ====================
     
@@ -213,14 +189,12 @@ class BluetoothManager:
             if address in self._connections:
                 conn = self._connections[address]
                 if conn.device_info.state == ConnectionState.CONNECTED:
+                    logger.debug(f"Already connected to {address}")
                     return True
             
             # Check connection limit
-            active_connections = sum(
-                1 for c in self._connections.values()
-                if c.device_info.state == ConnectionState.CONNECTED
-            )
-            if active_connections >= Config.bluetooth.MAX_CONCURRENT_CONNECTIONS:
+            if self.connection_count >= Config.bluetooth.MAX_CONCURRENT_CONNECTIONS:
+                logger.warning(f"Connection limit reached, cannot connect to {address}")
                 return False
             
             # Get or create device info
@@ -232,8 +206,7 @@ class BluetoothManager:
             device_info.connection_attempts += 1
         
         try:
-            logger.info(f"🔌 Attempting to connect to device: {address}")
-            logger.debug(f"Connection timeout: {Config.bluetooth.CONNECTION_TIMEOUT}s")
+            logger.info(f"🔌 Connecting to {address}...")
             
             client = BleakClient(address)
             await asyncio.wait_for(
@@ -241,28 +214,19 @@ class BluetoothManager:
                 timeout=Config.bluetooth.CONNECTION_TIMEOUT
             )
             
-            logger.debug(f"Connection attempt completed, checking if connected...")
-            
             if client.is_connected:
-                logger.info(f"✅ Successfully connected to {address}")
+                logger.info(f"✅ Connected to {address}")
                 
-                # Verify device has our service UUID (check if it's an app device)
-                # Note: We're lenient here - if verification fails, we still allow connection
-                # This is because devices might not have the service set up yet
-                logger.debug(f"🔍 Verifying service UUID for {address}...")
+                # Verify service UUID
                 has_service = await self._verify_service_uuid(client)
                 if not has_service:
-                    logger.warning(f"⚠️ Device {address} connected but doesn't have our service UUID. Connection allowed for now.")
-                    # Don't disconnect - allow connection and verify later during message exchange
-                else:
-                    logger.info(f"✅ Service UUID verified for {address} - this is an app device")
+                    logger.warning(f"⚠️ Device {address} doesn't have our service UUID")
                 
-                # Subscribe to notifications for receiving messages
+                # Set up notifications
                 try:
                     await self._setup_notifications(client, address)
                 except Exception as e:
                     logger.warning(f"Failed to setup notifications for {address}: {e}")
-                    # Continue anyway - we can still send messages
                 
                 async with self._connection_lock:
                     device_info.state = ConnectionState.CONNECTED
@@ -290,23 +254,22 @@ class BluetoothManager:
                 return False
                 
         except asyncio.TimeoutError:
+            logger.warning(f"Connection to {address} timed out")
             async with self._connection_lock:
                 device_info.state = ConnectionState.ERROR
                 device_info.decrease_health(0.2)
-            raise BluetoothTimeoutError(
-                f"Connection to {address} timed out",
-                device_address=address,
-                timeout_seconds=Config.bluetooth.CONNECTION_TIMEOUT
-            )
+            return False
         except BleakError as e:
+            logger.warning(f"Connection to {address} failed: {e}")
             async with self._connection_lock:
                 device_info.state = ConnectionState.ERROR
                 device_info.decrease_health(0.3)
-            raise BluetoothConnectionError(
-                f"Failed to connect to {address}: {e}",
-                device_address=address,
-                retry_count=device_info.connection_attempts
-            )
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error connecting to {address}: {e}")
+            async with self._connection_lock:
+                device_info.state = ConnectionState.ERROR
+            return False
     
     async def disconnect_device(self, address: str) -> bool:
         """
@@ -333,7 +296,7 @@ class BluetoothManager:
             if conn.client and conn.client.is_connected:
                 await conn.client.disconnect()
         except Exception:
-            pass  # Ignore disconnect errors
+            pass
         
         conn.device_info.state = ConnectionState.DISCONNECTED
         del self._connections[address]
@@ -342,6 +305,7 @@ class BluetoothManager:
         if self._on_device_disconnected:
             await self._safe_callback(self._on_device_disconnected, conn.device_info)
         
+        logger.info(f"Disconnected from {address}")
         return True
     
     async def _handle_disconnect(self, address: str) -> None:
@@ -352,75 +316,49 @@ class BluetoothManager:
                 conn.device_info.state = ConnectionState.DISCONNECTED
                 conn.device_info.decrease_health(0.2)
                 
-                # Notify callback
                 if self._on_device_disconnected:
                     await self._safe_callback(self._on_device_disconnected, conn.device_info)
                 
                 del self._connections[address]
+        
+        logger.info(f"Device {address} disconnected unexpectedly")
     
     # ==================== Data Transmission ====================
     
     async def _verify_service_uuid(self, client: BleakClient) -> bool:
-        """
-        Verify if a connected device has our service UUID.
-        
-        Args:
-            client: Connected BLE client.
-            
-        Returns:
-            True if device has our service UUID, False otherwise.
-        """
+        """Verify if a connected device has our service UUID."""
         try:
             services = await client.get_services()
             target_uuid = BluetoothConstants.SERVICE_UUID.lower()
             
             for service in services:
-                service_uuid_str = str(service.uuid).lower()
-                if target_uuid in service_uuid_str:
+                if target_uuid in str(service.uuid).lower():
                     return True
             return False
         except Exception as e:
             logger.warning(f"Error verifying service UUID: {e}")
-            # If we can't verify, assume it's OK (for compatibility)
-            return True
+            return True  # Assume OK if we can't verify
     
     async def _setup_notifications(self, client: BleakClient, address: str) -> None:
-        """
-        Set up notification subscription for receiving messages.
-        
-        Args:
-            client: Connected BLE client.
-            address: Device address.
-        """
+        """Set up notification subscription for receiving messages."""
         try:
-            # Get services to find the characteristic
             services = await client.get_services()
-            
-            # Find our service and characteristic
             target_char = None
+            
             for service in services:
-                service_uuid_str = str(service.uuid).lower()
-                if BluetoothConstants.SERVICE_UUID.lower() in service_uuid_str:
+                if BluetoothConstants.SERVICE_UUID.lower() in str(service.uuid).lower():
                     for char in service.characteristics:
-                        char_uuid_str = str(char.uuid).lower()
-                        if BluetoothConstants.CHARACTERISTIC_UUID.lower() in char_uuid_str:
-                            # Check if characteristic supports notifications
+                        if BluetoothConstants.CHARACTERISTIC_UUID.lower() in str(char.uuid).lower():
                             if "notify" in char.properties or "indicate" in char.properties:
                                 target_char = char
                                 break
                     if target_char:
                         break
             
-            # If characteristic not found, log warning and return
             if not target_char:
-                logger.warning(
-                    f"Characteristic {BluetoothConstants.CHARACTERISTIC_UUID} not found "
-                    f"or doesn't support notifications on {address}. "
-                    f"Message reception may not work."
-                )
+                logger.debug(f"No notification characteristic found on {address}")
                 return
             
-            # Subscribe to notifications
             await client.start_notify(
                 target_char.uuid,
                 lambda sender, data: asyncio.create_task(
@@ -428,24 +366,14 @@ class BluetoothManager:
                 )
             )
             
-            logger.info(f"Successfully subscribed to notifications on {address}")
+            logger.info(f"Subscribed to notifications on {address}")
             
-        except BleakError as e:
-            # Log but don't fail - some devices might not support notifications
-            logger.warning(f"Could not setup notifications for {address}: {e}")
         except Exception as e:
-            logger.warning(f"Unexpected error setting up notifications for {address}: {e}")
+            logger.warning(f"Could not setup notifications for {address}: {e}")
     
     async def _notification_handler(self, address: str, data: bytes) -> None:
-        """
-        Handle incoming BLE notification (message received).
-        
-        Args:
-            address: Device address that sent the message.
-            data: Raw message data.
-        """
+        """Handle incoming BLE notification."""
         try:
-            # Update connection stats
             async with self._connection_lock:
                 if address in self._connections:
                     conn = self._connections[address]
@@ -457,14 +385,12 @@ class BluetoothManager:
             try:
                 message_dict = json.loads(data.decode('utf-8'))
             except (json.JSONDecodeError, UnicodeDecodeError):
-                # Try to handle as raw dict if already parsed
                 if isinstance(data, dict):
                     message_dict = data
                 else:
                     logger.warning(f"Failed to parse message from {address}")
                     return
             
-            # Notify callback
             if self._on_message_received:
                 await self._safe_callback(self._on_message_received, address, message_dict)
                 
@@ -484,50 +410,36 @@ class BluetoothManager:
         """
         async with self._connection_lock:
             if address not in self._connections:
+                logger.warning(f"Cannot send to {address}: not connected")
                 return False
             
             conn = self._connections[address]
             if not conn.client or not conn.client.is_connected:
+                logger.warning(f"Cannot send to {address}: client not connected")
                 return False
         
         try:
-            # Get services to find the characteristic
             services = await conn.client.get_services()
-            
-            # Find our service and characteristic
             target_char = None
+            
             for service in services:
-                service_uuid_str = str(service.uuid).lower()
-                if BluetoothConstants.SERVICE_UUID.lower() in service_uuid_str:
+                if BluetoothConstants.SERVICE_UUID.lower() in str(service.uuid).lower():
                     for char in service.characteristics:
-                        char_uuid_str = str(char.uuid).lower()
-                        if BluetoothConstants.CHARACTERISTIC_UUID.lower() in char_uuid_str:
-                            # Check if characteristic supports write
+                        if BluetoothConstants.CHARACTERISTIC_UUID.lower() in str(char.uuid).lower():
                             if "write" in char.properties or "write-without-response" in char.properties:
                                 target_char = char
                                 break
                     if target_char:
                         break
             
-            # If characteristic not found, try UUID directly
             if not target_char:
-                char_uuid = BluetoothConstants.CHARACTERISTIC_UUID
-                logger.warning(
-                    f"Characteristic not found for {address}, trying UUID directly. "
-                    f"Message sending may fail."
-                )
-            else:
-                char_uuid = target_char.uuid
+                logger.warning(f"No write characteristic found on {address}")
+                return False
             
-            # Write to characteristic (use write-without-response if available for speed)
-            use_response = False
-            if target_char and "write-without-response" in target_char.properties:
-                use_response = False
-            elif target_char and "write" in target_char.properties:
-                use_response = True
+            use_response = "write-without-response" not in target_char.properties
             
             await conn.client.write_gatt_char(
-                char_uuid,
+                target_char.uuid,
                 data,
                 response=use_response
             )
@@ -536,45 +448,26 @@ class BluetoothManager:
                 conn.bytes_sent += len(data)
                 conn.messages_sent += 1
             
+            logger.debug(f"Sent {len(data)} bytes to {address}")
             return True
             
-        except BleakError as e:
+        except Exception as e:
+            logger.warning(f"Error sending data to {address}: {e}")
             async with self._connection_lock:
                 if address in self._connections:
                     self._connections[address].device_info.decrease_health(0.1)
             return False
-        except Exception as e:
-            logger.warning(f"Error sending data to {address}: {e}")
-            return False
     
     async def send_message(self, address: str, message: dict) -> bool:
-        """
-        Send a JSON message to a connected device.
-        
-        Args:
-            address: Target device address.
-            message: Message dictionary to send.
-            
-        Returns:
-            True if send successful, False otherwise.
-        """
+        """Send a JSON message to a connected device."""
         try:
             data = json.dumps(message).encode("utf-8")
             return await self.send_data(address, data)
-        except (json.JSONDecodeError, UnicodeEncodeError):
+        except Exception:
             return False
     
     async def broadcast_message(self, message: dict, exclude: List[str] = None) -> int:
-        """
-        Broadcast a message to all connected devices.
-        
-        Args:
-            message: Message dictionary to broadcast.
-            exclude: List of addresses to exclude from broadcast.
-            
-        Returns:
-            Number of successful sends.
-        """
+        """Broadcast a message to all connected devices."""
         exclude = exclude or []
         success_count = 0
         
@@ -591,57 +484,6 @@ class BluetoothManager:
         
         return success_count
     
-    # ==================== Device Discovery ====================
-    
-    async def scan_for_devices(self, timeout: float = None) -> List[DeviceInfo]:
-        """
-        Scan for nearby BLE devices.
-        
-        Args:
-            timeout: Scan timeout in seconds.
-            
-        Returns:
-            List of discovered devices.
-        """
-        timeout = timeout or BluetoothConstants.DEFAULT_SCAN_TIMEOUT
-        
-        discovered = []
-        
-        def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
-            """Callback for device detection."""
-            # IMPORTANT: Discover ALL BLE devices, not just those with our service UUID
-            # This allows discovery even when devices aren't advertising yet
-            # We'll verify service UUID after connection attempt
-            
-            device_info = DeviceInfo(
-                address=device.address,
-                name=device.name or advertisement_data.local_name,
-                rssi=advertisement_data.rssi,
-                state=ConnectionState.DISCONNECTED,
-            )
-            device_info.update_seen()
-            discovered.append(device_info)
-        
-        try:
-            scanner = BleakScanner(detection_callback=detection_callback)
-            await scanner.start()
-            await asyncio.sleep(timeout)
-            await scanner.stop()
-            
-            # Update discovered devices cache
-            async with self._device_lock:
-                for device in discovered:
-                    self._discovered_devices[device.address] = device
-                    
-                    # Notify callback
-                    if self._on_device_discovered:
-                        await self._safe_callback(self._on_device_discovered, device)
-            
-            return discovered
-            
-        except BleakError as e:
-            raise BluetoothDiscoveryError(f"Scan failed: {e}")
-    
     # ==================== Status & Info ====================
     
     async def get_connected_devices(self) -> List[DeviceInfo]:
@@ -654,7 +496,7 @@ class BluetoothManager:
             ]
     
     async def get_all_devices(self) -> List[DeviceInfo]:
-        """Get list of all known devices (connected and discovered)."""
+        """Get list of all known devices."""
         async with self._device_lock:
             return list(self._discovered_devices.values())
     
@@ -707,8 +549,8 @@ class BluetoothManager:
             result = callback(*args)
             if asyncio.iscoroutine(result):
                 await result
-        except Exception:
-            pass  # Don't let callback errors crash the manager
+        except Exception as e:
+            logger.error(f"Error in callback: {e}")
     
     # ==================== Background Tasks ====================
     
@@ -729,35 +571,33 @@ class BluetoothManager:
             except asyncio.CancelledError:
                 break
             except Exception:
-                pass  # Continue heartbeat loop on errors
+                pass
     
     async def _cleanup_loop(self) -> None:
         """Background task to cleanup stale connections."""
         while self._running:
             try:
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(30)
                 
                 current_time = time.time()
                 stale_addresses = []
                 
                 async with self._connection_lock:
                     for address, conn in self._connections.items():
-                        # Check for heartbeat timeout
                         if conn.device_info.last_heartbeat > 0:
                             time_since_heartbeat = current_time - conn.device_info.last_heartbeat
                             if time_since_heartbeat > Config.bluetooth.HEARTBEAT_TIMEOUT:
                                 stale_addresses.append(address)
                                 conn.device_info.decrease_health(0.3)
                         
-                        # Check for very low health
                         if conn.device_info.health_score < BluetoothConstants.HEALTH_SCORE_CRITICAL:
                             stale_addresses.append(address)
                 
-                # Disconnect stale connections
                 for address in set(stale_addresses):
+                    logger.info(f"Removing stale connection: {address}")
                     await self.disconnect_device(address)
                 
             except asyncio.CancelledError:
                 break
             except Exception:
-                pass  # Continue cleanup loop on errors
+                pass

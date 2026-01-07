@@ -1,5 +1,6 @@
 #!/bin/bash
 # Bluetooth Mesh Broadcast Application - Startup Script
+# Version 2.0 - Pure asyncio architecture
 # Run with: ./start.sh
 
 set -e  # Exit on error
@@ -8,16 +9,19 @@ set -e  # Exit on error
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # Get the script directory
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 cd "$SCRIPT_DIR"
 
+echo -e "${CYAN}"
 echo "=========================================="
 echo "Bluetooth Mesh Broadcast Application"
+echo "Version 2.0.0 - Pure Asyncio"
 echo "=========================================="
-echo ""
+echo -e "${NC}"
 
 # Check if virtual environment exists
 if [ ! -d "venv" ]; then
@@ -32,18 +36,26 @@ if [ ! -d "venv" ]; then
     pip install -r requirements.txt
     echo -e "${GREEN}✓ Dependencies installed${NC}"
     echo ""
+else
+    # Activate virtual environment
+    echo "Activating virtual environment..."
+    source venv/bin/activate
 fi
 
-# Activate virtual environment
-echo "Activating virtual environment..."
-source venv/bin/activate
-
-# Check if dependencies are installed
-if ! python -c "import flask" 2>/dev/null; then
-    echo -e "${YELLOW}Dependencies not installed. Installing...${NC}"
+# Check if dependencies need updating
+if ! python -c "import aiohttp" 2>/dev/null; then
+    echo -e "${YELLOW}Dependencies not installed or need updating...${NC}"
     pip install --upgrade pip
     pip install -r requirements.txt
     echo -e "${GREEN}✓ Dependencies installed${NC}"
+    echo ""
+fi
+
+# Check for bless library (GATT server)
+if ! python -c "import bless" 2>/dev/null; then
+    echo -e "${YELLOW}Installing bless library for GATT server support...${NC}"
+    pip install bless
+    echo -e "${GREEN}✓ bless installed${NC}"
     echo ""
 fi
 
@@ -64,7 +76,7 @@ if ! groups | grep -q bluetooth; then
     echo -e "${YELLOW}⚠ Warning: You may not be in the bluetooth group.${NC}"
     echo -e "${YELLOW}  If you encounter permission errors, run:${NC}"
     echo -e "${YELLOW}  sudo usermod -a -G bluetooth \$USER${NC}"
-    echo -e "${YELLOW}  Then logout and login again, or run: newgrp bluetooth${NC}"
+    echo -e "${YELLOW}  Then logout and login again${NC}"
     echo ""
 fi
 
@@ -79,13 +91,14 @@ echo ""
 cd backend
 
 # Start the application
+echo -e "${CYAN}"
 echo "=========================================="
 echo "Starting Application..."
 echo "=========================================="
-echo ""
+echo -e "${NC}"
 echo -e "${GREEN}Application will be available at: http://localhost:5000${NC}"
 echo -e "${GREEN}Press Ctrl+C to stop${NC}"
 echo ""
 
-# Run the application
+# Run the application with Python asyncio
 python main.py

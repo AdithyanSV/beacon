@@ -87,16 +87,16 @@ class WebConfig:
     
     HOST = os.getenv("HOST", "localhost")
     PORT = get_int_env("PORT", 5000)
-    DEBUG = get_bool_env("FLASK_DEBUG", True)
+    DEBUG = get_bool_env("DEBUG", True)
     SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
     
-    # SocketIO settings
-    SOCKETIO_ASYNC_MODE = "eventlet"
+    # SocketIO settings - using aiohttp async mode
+    SOCKETIO_ASYNC_MODE = "aiohttp"
     
     # Security
     ALLOWED_ORIGINS = get_list_env(
         "ALLOWED_ORIGINS",
-        ["http://localhost:5000", "http://127.0.0.1:5000"]
+        ["http://localhost:5000", "http://127.0.0.1:5000", "*"]
     )
     MAX_WEBSOCKET_CONNECTIONS = get_int_env("MAX_WEBSOCKET_CONNECTIONS", 10)  # per device
 

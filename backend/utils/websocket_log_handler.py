@@ -1,31 +1,43 @@
 """
 WebSocket Log Handler for Real-time Log Streaming to Frontend.
+
+Updated to work with async python-socketio.
 """
 
 import logging
-import json
+import asyncio
 from datetime import datetime
-from typing import Optional
-from flask_socketio import SocketIO
+from typing import Optional, List, Dict, Any
+from collections import deque
 
-# Global socketio instance (set by main.py)
-_socketio: Optional[SocketIO] = None
-_log_buffer = []
-_max_buffer_size = 1000
+# Global log buffer
+_log_buffer: deque = deque(maxlen=1000)
+
+# Reference to socketio (set by async_server)
+_sio = None
 
 
-class WebSocketLogHandler(logging.Handler):
+def set_socketio(sio):
+    """Set the Socket.IO server reference."""
+    global _sio
+    _sio = sio
+
+
+class AsyncWebSocketLogHandler(logging.Handler):
     """
     Log handler that sends logs to connected WebSocket clients.
+    
+    Works with async python-socketio.
     """
     
     def __init__(self, level=logging.NOTSET):
         super().__init__(level)
         self._enabled = True
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
     
     def emit(self, record: logging.LogRecord):
         """Emit a log record to WebSocket clients."""
-        if not self._enabled or not _socketio:
+        if not self._enabled:
             return
         
         try:
@@ -51,14 +63,31 @@ class WebSocketLogHandler(logging.Handler):
             
             # Add to buffer
             _log_buffer.append(log_data)
-            if len(_log_buffer) > _max_buffer_size:
-                _log_buffer.pop(0)
             
             # Emit to all connected clients
-            _socketio.emit('log_message', log_data, room='broadcast')
+            if _sio:
+                try:
+                    # Get the running loop
+                    try:
+                        loop = asyncio.get_running_loop()
+                        # Schedule the emit as a task
+                        asyncio.create_task(self._emit_log(log_data))
+                    except RuntimeError:
+                        # No running loop - skip WebSocket emission
+                        pass
+                except Exception:
+                    pass
             
         except Exception:
             # Don't let logging errors break the application
+            pass
+    
+    async def _emit_log(self, log_data: Dict[str, Any]):
+        """Async emit to WebSocket clients."""
+        try:
+            if _sio:
+                await _sio.emit('log_message', log_data, room='broadcast')
+        except Exception:
             pass
     
     def set_enabled(self, enabled: bool):
@@ -66,13 +95,22 @@ class WebSocketLogHandler(logging.Handler):
         self._enabled = enabled
 
 
-def setup_websocket_logging(socketio_instance: SocketIO):
-    """Set up WebSocket logging handler."""
-    global _socketio
-    _socketio = socketio_instance
+def setup_websocket_logging(sio=None):
+    """
+    Set up WebSocket logging handler.
+    
+    Args:
+        sio: Socket.IO server instance (optional, can be set later).
+        
+    Returns:
+        The log handler instance.
+    """
+    global _sio
+    if sio:
+        _sio = sio
     
     # Create and add handler
-    handler = WebSocketLogHandler(level=logging.DEBUG)
+    handler = AsyncWebSocketLogHandler(level=logging.DEBUG)
     handler.setFormatter(logging.Formatter('%(message)s'))
     
     # Add to root logger
@@ -82,12 +120,11 @@ def setup_websocket_logging(socketio_instance: SocketIO):
     return handler
 
 
-def get_log_buffer() -> list:
+def get_log_buffer() -> List[Dict[str, Any]]:
     """Get the current log buffer."""
-    return _log_buffer.copy()
+    return list(_log_buffer)
 
 
 def clear_log_buffer():
     """Clear the log buffer."""
-    global _log_buffer
     _log_buffer.clear()

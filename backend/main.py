@@ -1,8 +1,14 @@
 """
 Bluetooth Mesh Broadcast Application - Main Entry Point
 
-This is the main entry point for the application. It initializes all components
-and starts the web server with Bluetooth support.
+This is the main entry point for the application. It uses a single asyncio
+event loop to coordinate all components:
+- BLE GATT Server (to accept incoming connections)
+- BLE Client/Scanner (to discover and connect to other devices)
+- Web Server with WebSocket support
+- Message handling and routing
+
+Version 2.0 - Pure asyncio architecture (no eventlet)
 """
 
 import asyncio
@@ -10,27 +16,26 @@ import signal
 import sys
 import os
 from typing import Optional
+from aiohttp import web
 
 # Add backend directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import eventlet and monkey patch BEFORE other imports
-import eventlet
-eventlet.monkey_patch()
-
 from config import Config
 from utils.logger import setup_logging, get_logger
 from utils.resource_monitor import ResourceMonitor
-from utils.websocket_log_handler import setup_websocket_logging
 from bluetooth.manager import BluetoothManager
 from bluetooth.discovery import DeviceDiscovery
 from bluetooth.connection_pool import ConnectionPool
+from bluetooth.gatt_server import BLEGATTServer
 from messaging.handler import MessageHandler
-from web.server import create_app, socketio
-from web.handlers import (
+from web.async_server import (
+    create_app,
+    sio,
     set_bluetooth_manager,
     set_message_handler,
     set_discovery,
+    set_gatt_server,
     emit_message_received,
     emit_devices_updated,
 )
@@ -39,12 +44,12 @@ from web.handlers import (
 setup_logging()
 logger = get_logger(__name__)
 
-# Set up WebSocket logging (will be initialized after socketio is created)
-
 
 class Application:
     """
     Main application class that coordinates all components.
+    
+    Uses a single asyncio event loop for all async operations.
     """
     
     def __init__(self):
@@ -57,9 +62,12 @@ class Application:
         self._connection_pool: Optional[ConnectionPool] = None
         self._message_handler: Optional[MessageHandler] = None
         self._resource_monitor: Optional[ResourceMonitor] = None
+        self._gatt_server: Optional[BLEGATTServer] = None
         
-        # Flask app
-        self._app = None
+        # Web app
+        self._app: Optional[web.Application] = None
+        self._runner: Optional[web.AppRunner] = None
+        self._site: Optional[web.TCPSite] = None
     
     async def initialize(self) -> bool:
         """
@@ -80,11 +88,16 @@ class Application:
             logger.info("Initializing Bluetooth manager...")
             self._bluetooth_manager = BluetoothManager()
             try:
-                # Initialize Bluetooth (this is async, we're in async context)
                 await self._bluetooth_manager.initialize()
+                logger.info("✓ Bluetooth manager initialized")
             except Exception as e:
                 logger.warning(f"Bluetooth initialization failed: {e}")
-                logger.info("Continuing without Bluetooth support...")
+                logger.info("Continuing without Bluetooth client support...")
+            
+            # Initialize GATT Server (NEW - hosts our service UUID)
+            logger.info("Initializing GATT server...")
+            self._gatt_server = BLEGATTServer()
+            self._gatt_server.set_message_received_callback(self._on_gatt_message_received)
             
             # Initialize Discovery
             logger.info("Initializing device discovery...")
@@ -107,22 +120,14 @@ class Application:
             # Set up callbacks
             self._setup_callbacks()
             
-            # Note: Background services will be started after initialization
-            # in a persistent async runner to avoid eventlet conflicts
-            
-            logger.info("Components initialized, background services will start after initialization")
-            
             # Set up web handlers
             set_bluetooth_manager(self._bluetooth_manager)
             set_message_handler(self._message_handler)
             set_discovery(self._discovery)
+            set_gatt_server(self._gatt_server)
             
-            # Create Flask app
+            # Create web app
             self._app = create_app()
-            
-            # Set up WebSocket logging for real-time log streaming to frontend
-            setup_websocket_logging(socketio)
-            logger.info("WebSocket logging enabled - logs will stream to frontend")
             
             logger.info("Application initialized successfully")
             return True
@@ -137,7 +142,6 @@ class Application:
         """Set up callbacks between components."""
         
         if self._bluetooth_manager:
-            # Bluetooth Manager callbacks
             self._bluetooth_manager.set_device_connected_callback(
                 self._on_device_connected
             )
@@ -149,7 +153,6 @@ class Application:
             )
         
         if self._discovery:
-            # Discovery callbacks
             self._discovery.set_app_device_found_callback(
                 self._on_app_device_found
             )
@@ -161,13 +164,11 @@ class Application:
             )
         
         if self._message_handler:
-            # Message Handler callbacks
             self._message_handler.set_message_received_callback(
                 self._on_message_received
             )
         
         if self._resource_monitor:
-            # Resource Monitor callbacks
             self._resource_monitor.set_warning_callback(
                 self._on_resource_warning
             )
@@ -177,7 +178,7 @@ class Application:
     
     async def _on_device_connected(self, device_info):
         """Handle device connection."""
-        logger.info(f"Device connected: {device_info.address}")
+        logger.info(f"✅ Device connected: {device_info.address}")
         
         # Add to connection pool
         await self._connection_pool.add_connection(
@@ -190,7 +191,7 @@ class Application:
     
     async def _on_device_disconnected(self, device_info):
         """Handle device disconnection."""
-        logger.info(f"Device disconnected: {device_info.address}")
+        logger.info(f"❌ Device disconnected: {device_info.address}")
         
         # Remove from connection pool
         await self._connection_pool.remove_connection(device_info.address)
@@ -199,29 +200,25 @@ class Application:
         await self._emit_device_update()
     
     async def _on_bluetooth_message(self, address: str, data: dict):
-        """Handle incoming Bluetooth message."""
+        """Handle incoming Bluetooth message from a connected device."""
         try:
-            # Convert dict to bytes if needed
+            import json
             if isinstance(data, dict):
-                import json
                 message_bytes = json.dumps(data).encode('utf-8')
             elif isinstance(data, bytes):
                 message_bytes = data
             else:
                 message_bytes = str(data).encode('utf-8')
             
-            # Get connected devices for forwarding
             connected = await self._bluetooth_manager.get_connected_devices()
             connected_addresses = [d.address for d in connected]
             
-            # Process through message handler
             message, forward_to = await self._message_handler.receive_message(
                 message_bytes,
                 source_device=address,
                 connected_devices=connected_addresses
             )
             
-            # Forward if needed
             if forward_to and message:
                 forward_data = await self._message_handler.prepare_for_forwarding(message)
                 if forward_data:
@@ -230,73 +227,68 @@ class Application:
             
         except Exception as e:
             logger.error(f"Error processing Bluetooth message: {e}")
-            import traceback
-            traceback.print_exc()
+    
+    async def _on_gatt_message_received(self, client_address: str, data: bytes):
+        """Handle message received via GATT server (from incoming connection)."""
+        logger.info(f"📨 Message received via GATT from {client_address}")
+        
+        try:
+            connected = []
+            if self._bluetooth_manager:
+                connected = await self._bluetooth_manager.get_connected_devices()
+            connected_addresses = [d.address for d in connected]
+            
+            message, forward_to = await self._message_handler.receive_message(
+                data,
+                source_device=client_address,
+                connected_devices=connected_addresses
+            )
+            
+            # Forward if needed
+            if forward_to and message:
+                forward_data = await self._message_handler.prepare_for_forwarding(message)
+                if forward_data:
+                    # Forward via BLE client connections
+                    if self._bluetooth_manager:
+                        for target in forward_to:
+                            await self._bluetooth_manager.send_data(target, forward_data)
+                    
+                    # Also broadcast via GATT server to other connected clients
+                    if self._gatt_server:
+                        await self._gatt_server.send_notification(forward_data)
+            
+        except Exception as e:
+            logger.error(f"Error processing GATT message: {e}")
     
     async def _on_app_device_found(self, device_info):
-        """Handle discovery of app device."""
+        """Handle discovery of app device (advertising our service UUID)."""
         logger.info(f"🎉 APP DEVICE FOUND: {device_info.address}")
         logger.info(f"   Name: {device_info.name or 'Unknown'}")
         logger.info(f"   This device is running our application!")
         
-        # Try to connect if not at capacity
+        # Try to connect
         if self._connection_pool and self._connection_pool.available_slots > 0:
             try:
                 logger.info(f"🔌 Connecting to app device {device_info.address}...")
                 success = await self._bluetooth_manager.connect_to_device(device_info.address)
                 if success:
-                    logger.info(f"✅✅✅ SUCCESSFULLY CONNECTED TO APP DEVICE: {device_info.address}")
+                    logger.info(f"✅ CONNECTED TO APP DEVICE: {device_info.address}")
                 else:
-                    logger.warning(f"❌ Connection to app device {device_info.address} failed")
+                    logger.warning(f"❌ Connection to {device_info.address} failed")
             except Exception as e:
-                logger.error(f"❌ Failed to connect to app device {device_info.address}: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
-        else:
-            logger.warning(f"⚠️ Cannot connect to {device_info.address}: Connection pool full")
+                logger.error(f"❌ Connection error: {e}")
     
     async def _on_device_found(self, device_info):
-        """Handle discovery of any device - try to connect to all devices."""
-        logger.info(f"🎯 DEVICE DISCOVERED: {device_info.address}")
-        logger.info(f"   Name: {device_info.name or 'Unknown'}")
-        logger.info(f"   RSSI: {device_info.rssi}")
-        logger.info(f"   State: {device_info.state.name}")
-        
-        # IMPORTANT: Try to connect to ALL discovered devices
-        # We'll verify if they're app devices after connection
-        if self._bluetooth_manager and self._connection_pool:
-            # Check if already connected
-            connected = await self._bluetooth_manager.get_connected_devices()
-            already_connected = any(d.address == device_info.address for d in connected)
-            
-            if already_connected:
-                logger.info(f"⏭️ Device {device_info.address} already connected, skipping")
-            elif self._connection_pool.available_slots <= 0:
-                logger.warning(f"⚠️ Connection pool full ({self._connection_pool.available_slots} slots), cannot connect to {device_info.address}")
-            else:
-                try:
-                    logger.info(f"🔌 INITIATING CONNECTION to {device_info.address}...")
-                    logger.info(f"   Available slots: {self._connection_pool.available_slots}")
-                    success = await self._bluetooth_manager.connect_to_device(device_info.address)
-                    if success:
-                        logger.info(f"✅✅✅ CONNECTION SUCCESSFUL: {device_info.address}")
-                    else:
-                        logger.warning(f"❌ Connection attempt to {device_info.address} returned False")
-                except Exception as e:
-                    logger.warning(f"❌ Connection attempt to {device_info.address} failed: {e}")
-                    import traceback
-                    logger.debug(traceback.format_exc())
+        """Handle discovery of any device."""
+        logger.debug(f"📱 Device discovered: {device_info.address} | {device_info.name or 'Unknown'}")
     
     async def _on_device_lost(self, device_info):
         """Handle device lost from discovery."""
-        logger.info(f"Device lost: {device_info.address}")
+        logger.debug(f"Device lost: {device_info.address}")
     
     async def _on_message_received(self, message):
         """Handle received message (for UI)."""
-        # Emit to web clients
-        emit_message_received(message.to_dict(), is_own=False)
-        
-        # Record for resource monitoring
+        await emit_message_received(message.to_dict(), is_own=False)
         self._resource_monitor.record_message()
     
     async def _on_resource_warning(self, message: str, snapshot):
@@ -312,95 +304,119 @@ class Application:
         if self._bluetooth_manager:
             devices = await self._bluetooth_manager.get_connected_devices()
             device_list = [d.to_dict() for d in devices]
-            emit_devices_updated(device_list, len(device_list))
+            await emit_devices_updated(device_list, len(device_list))
     
-    def start_sync(self):
-        """Start the application (synchronous version for eventlet)."""
+    async def start(self):
+        """Start the application - all components in single event loop."""
         if self._running:
             return
         
         logger.info("Starting application...")
         self._running = True
         
-        # Start background async services in a separate thread
-        # This ensures they run in a persistent event loop
-        import threading
+        # Start all components as concurrent tasks
+        tasks = []
         
-        def start_async_services():
-            """Start async services in a background thread."""
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
+        # Start GATT server
+        if self._gatt_server:
             try:
-                async def start_all():
-                    if self._bluetooth_manager:
-                        await self._bluetooth_manager.start()
-                        logger.info("✓ Bluetooth manager started")
-                    
-                    if self._discovery:
-                        await self._discovery.start()
-                        logger.info("✓ Device discovery started")
-                    
-                    if self._connection_pool:
-                        await self._connection_pool.start()
-                        logger.info("✓ Connection pool started")
-                
-                loop.run_until_complete(start_all())
-                loop.run_forever()  # Keep loop running
+                await self._gatt_server.start()
+                logger.info("✓ GATT server started")
             except Exception as e:
-                logger.error(f"Error in async services thread: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
-            finally:
-                loop.close()
+                logger.warning(f"Failed to start GATT server: {e}")
         
-        # Start async services in background thread
-        async_thread = threading.Thread(target=start_async_services, daemon=True)
-        async_thread.start()
-        logger.info("Async services thread started")
+        # Start Bluetooth manager
+        if self._bluetooth_manager:
+            try:
+                await self._bluetooth_manager.start()
+                logger.info("✓ Bluetooth manager started")
+            except Exception as e:
+                logger.warning(f"Failed to start Bluetooth manager: {e}")
         
-        # Give services a moment to start
-        import time
-        time.sleep(1)
+        # Start discovery
+        if self._discovery:
+            try:
+                await self._discovery.start()
+                logger.info("✓ Device discovery started")
+            except Exception as e:
+                logger.warning(f"Failed to start discovery: {e}")
         
+        # Start connection pool
+        if self._connection_pool:
+            try:
+                await self._connection_pool.start()
+                logger.info("✓ Connection pool started")
+            except Exception as e:
+                logger.warning(f"Failed to start connection pool: {e}")
+        
+        # Start web server
         try:
-            logger.info(f"Starting web server on {Config.web.HOST}:{Config.web.PORT}")
+            self._runner = web.AppRunner(self._app)
+            await self._runner.setup()
             
-            # Run Flask-SocketIO (this blocks)
-            socketio.run(
-                self._app,
-                host=Config.web.HOST,
-                port=Config.web.PORT,
-                debug=Config.web.DEBUG,
-                use_reloader=False,  # Disable reloader for production
-                log_output=True
+            self._site = web.TCPSite(
+                self._runner,
+                Config.web.HOST,
+                Config.web.PORT
             )
+            await self._site.start()
             
+            logger.info(f"✓ Web server started at http://{Config.web.HOST}:{Config.web.PORT}")
         except Exception as e:
-            logger.error(f"Error starting application: {e}")
+            logger.error(f"Failed to start web server: {e}")
             raise
+        
+        logger.info("=" * 50)
+        logger.info("APPLICATION RUNNING")
+        logger.info(f"  Web UI: http://{Config.web.HOST}:{Config.web.PORT}")
+        logger.info(f"  GATT Server: {'Running' if self._gatt_server and self._gatt_server.is_running else 'Not running'}")
+        logger.info(f"  BLE Discovery: {'Running' if self._discovery else 'Not running'}")
+        logger.info("=" * 50)
+        
+        # Wait for shutdown signal
+        await self._shutdown_event.wait()
     
-    def stop_sync(self):
-        """Stop the application (synchronous version)."""
+    async def stop(self):
+        """Stop the application."""
         if not self._running:
             return
         
         logger.info("Stopping application...")
         self._running = False
+        
+        # Stop web server
+        if self._site:
+            await self._site.stop()
+        if self._runner:
+            await self._runner.cleanup()
+        
+        # Stop components
+        if self._discovery:
+            await self._discovery.stop()
+        
+        if self._bluetooth_manager:
+            await self._bluetooth_manager.stop()
+        
+        if self._gatt_server:
+            await self._gatt_server.stop()
+        
+        if self._connection_pool:
+            await self._connection_pool.stop()
+        
+        self._shutdown_event.set()
         logger.info("Application stopped")
     
-    def handle_signal(self, signum, frame):
-        """Handle shutdown signals."""
-        logger.info(f"Received signal {signum}, shutting down...")
-        self._running = False
+    def request_shutdown(self):
+        """Request application shutdown (can be called from signal handler)."""
+        asyncio.create_task(self.stop())
 
 
-def main():
+async def main():
     """Main entry point."""
     print("""
     ╔══════════════════════════════════════════════════════════╗
     ║          Bluetooth Mesh Broadcast Application            ║
-    ║                      Version 1.0.0                       ║
+    ║                  Version 2.0.0 (Async)                   ║
     ╚══════════════════════════════════════════════════════════╝
     """)
     
@@ -408,29 +424,23 @@ def main():
     app = Application()
     
     # Set up signal handlers
-    signal.signal(signal.SIGINT, app.handle_signal)
-    signal.signal(signal.SIGTERM, app.handle_signal)
+    loop = asyncio.get_event_loop()
+    
+    def signal_handler():
+        logger.info("Received shutdown signal")
+        app.request_shutdown()
+    
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, signal_handler)
     
     try:
-        # Initialize using eventlet
-        import eventlet
-        
-        # Run initialization
-        def run_init():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(app.initialize())
-            loop.close()
-            return result
-        
-        init_result = run_init()
-        
-        if not init_result:
+        # Initialize
+        if not await app.initialize():
             logger.error("Failed to initialize application")
             sys.exit(1)
         
-        # Start the application (blocking)
-        app.start_sync()
+        # Start (runs until shutdown)
+        await app.start()
         
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received")
@@ -440,11 +450,10 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     finally:
-        # Cleanup
-        app.stop_sync()
+        await app.stop()
     
     logger.info("Application exited")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
