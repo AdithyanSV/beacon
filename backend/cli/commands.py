@@ -108,21 +108,28 @@ Available Commands:
 
   send <message>      Broadcast a message to the mesh network
                       Aliases: s
+                      Flow: Type your message and send to all peers.
 
-  list                Show connected and discovered devices
+  list                Show connected and discovered app devices
                       Aliases: ls, devices
+                      Flow: See who is connected and who is discoverable.
 
   scan                Force an immediate device scan
                       Aliases: discover
+                      Flow: Use when a new laptop joins and you want it
+                            to appear quickly.
 
   connect <address>   Connect to a device by address
                       Aliases: c
+                      Flow: Manually connect when auto-connect fails.
 
   disconnect <addr>   Disconnect from a device
                       Aliases: dc
 
-  status              Show system status
+  status              Show live system + discovery status
                       Aliases: st
+                      Flow: Your main dashboard. Shows Bluetooth state,
+                            GATT server, discovery stats and scan interval.
 
   stats               Show message statistics
                       Aliases: statistics
@@ -136,5 +143,9 @@ Available Commands:
   quit                Exit the application
                       Aliases: exit, q
 
+Tip: Typical flow
+  1) status        # check Bluetooth + discovery are running
+  2) list          # see app devices
+  3) send hello    # broadcast a message
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """

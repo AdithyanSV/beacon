@@ -95,11 +95,15 @@ class TerminalUI:
         print(banner)
     
     def print_startup_info(self, local_address: str = None):
-        """Print startup information."""
+        """Print startup information and quick-start flow."""
         print(f"{Colors.GREEN}[INFO]{Colors.RESET} Application starting...")
         if local_address:
             print(f"{Colors.GREEN}[INFO]{Colors.RESET} Local address: {Colors.CYAN}{local_address}{Colors.RESET}")
-        print(f"{Colors.DIM}Type 'help' for available commands{Colors.RESET}")
+        print(f"{Colors.DIM}Quick start:{Colors.RESET}")
+        print(f"  1) status   {Colors.DIM}- check Bluetooth + discovery state{Colors.RESET}")
+        print(f"  2) list     {Colors.DIM}- see discovered app devices{Colors.RESET}")
+        print(f"  3) send hi  {Colors.DIM}- broadcast a test message{Colors.RESET}")
+        print(f"{Colors.DIM}Type 'help' for all commands and flows{Colors.RESET}")
         print()
     
     async def start(self):
@@ -258,14 +262,14 @@ class TerminalUI:
         print(self._input_prompt, end="", flush=True)
     
     def print_devices_list(self, connected: list, discovered: list):
-        """Print list of devices."""
+        """Print list of devices with richer info and hints."""
         print(f"\n{Colors.BOLD}Connected Devices ({len(connected)}/{Config.bluetooth.MAX_CONCURRENT_CONNECTIONS}):{Colors.RESET}")
         if connected:
             for dev in connected:
                 addr = dev.get("address", dev.address if hasattr(dev, "address") else str(dev))
                 name = dev.get("name", dev.name if hasattr(dev, "name") else None) or "Unknown"
                 rssi = dev.get("rssi", dev.rssi if hasattr(dev, "rssi") else None)
-                rssi_str = f" | RSSI: {rssi}" if rssi else ""
+                rssi_str = f" | RSSI: {rssi}" if rssi is not None else ""
                 print(f"  {Colors.GREEN}●{Colors.RESET} {Colors.CYAN}{addr}{Colors.RESET} | {name}{rssi_str}")
         else:
             print(f"  {Colors.DIM}No connected devices{Colors.RESET}")
@@ -276,10 +280,17 @@ class TerminalUI:
                 addr = dev.get("address", dev.address if hasattr(dev, "address") else str(dev))
                 name = dev.get("name", dev.name if hasattr(dev, "name") else None) or "Unknown"
                 rssi = dev.get("rssi", dev.rssi if hasattr(dev, "rssi") else None)
-                rssi_str = f" | RSSI: {rssi}" if rssi else ""
+                rssi_str = f" | RSSI: {rssi}" if rssi is not None else ""
                 print(f"  {Colors.YELLOW}○{Colors.RESET} {Colors.CYAN}{addr}{Colors.RESET} | {name}{rssi_str}")
         else:
             print(f"  {Colors.DIM}No app devices discovered{Colors.RESET}")
+        
+        if not connected and discovered:
+            print(f"\n{Colors.DIM}Hint: devices are discovered but not yet connected.{Colors.RESET}")
+            print(f"{Colors.DIM}      They will auto-connect when slots are free, or use 'connect <address>'.{Colors.RESET}")
+        elif not discovered:
+            print(f"\n{Colors.DIM}Hint: if another laptop is running the app and discoverable,{Colors.RESET}")
+            print(f"{Colors.DIM}      run 'scan' here and 'status' on both to confirm discovery.{Colors.RESET}")
         print()
     
     def print_status(self, status: dict):
