@@ -224,5 +224,3 @@ newgrp bluetooth
 
 MIT License - See LICENSE file for details.
 # beacon
-# beacon
-# beacon
