@@ -42,3 +42,7 @@ pytest-cov==4.1.0
 black==23.12.1
 flake8==6.1.0
 mypy==1.7.1
+
+# Optional: For BLE advertising (recommended for full functionality)
+# dbus-python==1.2.18  # Uncomment to enable full BLE advertising via D-Bus
+# PyGObject==3.44.1     # Required for dbus-python on some systems

@@ -144,6 +144,8 @@ class DeviceDiscovery:
         
         def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
             """Handle device detection."""
+            # IMPORTANT: Don't filter by service UUID initially - discover ALL devices
+            # We'll verify if it's an app device after connection attempt
             is_app_device = self._is_app_device(device, advertisement_data)
             
             device_info = DeviceInfo(

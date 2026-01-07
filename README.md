@@ -23,6 +23,25 @@ A secure, optimized web-based application for Ubuntu 22.04 that enables mesh net
 - BlueZ 5.x
 - Modern web browser (Chrome, Firefox, Edge)
 
+## Quick Start
+
+1. **One-time setup** (if not already done):
+   ```bash
+   sudo bash setup_bluetooth.sh
+   ```
+
+2. **Start the application**:
+   ```bash
+   ./start.sh
+   ```
+
+3. **Open your browser**:
+   ```
+   http://localhost:5000
+   ```
+
+That's it! The startup script handles everything automatically.
+
 ## Installation
 
 ### 1. System Dependencies
@@ -32,7 +51,19 @@ sudo apt update
 sudo apt install bluetooth bluez libbluetooth-dev python3-dev python3-pip python3-venv
 ```
 
+Or run the setup script:
+```bash
+sudo bash setup_bluetooth.sh
+```
+
 ### 2. Project Setup
+
+The startup script (`start.sh`) will automatically:
+- Create virtual environment if needed
+- Install all dependencies
+- Configure Bluetooth
+
+If you prefer manual setup:
 
 ```bash
 cd bluetooth-mesh-broadcast
@@ -43,6 +74,8 @@ pip install -r requirements.txt
 
 ### 3. Bluetooth Configuration
 
+The startup script handles this automatically, but if you need to configure manually:
+
 ```bash
 sudo systemctl start bluetooth
 sudo systemctl enable bluetooth
@@ -52,7 +85,28 @@ bluetoothctl discoverable on
 
 ## Usage
 
-### Starting the Application
+### Quick Start (Recommended)
+
+Simply run the startup script:
+
+```bash
+./start.sh
+```
+
+The script will:
+- Check and create virtual environment if needed
+- Install dependencies automatically
+- Configure Bluetooth
+- Start the application
+
+**Note**: Make sure the script is executable:
+```bash
+chmod +x start.sh
+```
+
+### Manual Start
+
+If you prefer to start manually:
 
 ```bash
 source venv/bin/activate
@@ -62,7 +116,7 @@ python main.py
 
 ### Accessing the UI
 
-Open your browser and navigate to:
+Once the application is running, open your browser and navigate to:
 ```
 http://localhost:5000
 ```
@@ -223,4 +277,6 @@ newgrp bluetooth
 ## License
 
 MIT License - See LICENSE file for details.
+# beacon
+# beacon
 # beacon

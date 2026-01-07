@@ -33,6 +33,7 @@ from bluetooth.constants import (
     BluetoothConstants,
     MessageType,
 )
+from bluetooth.advertising import BLEAdvertising
 
 logger = get_logger(__name__)
 
@@ -77,6 +78,9 @@ class BluetoothManager:
         # Scanner
         self._scanner: Optional[BleakScanner] = None
         
+        # BLE Advertising
+        self._advertising: Optional[BLEAdvertising] = None
+        
         # Background tasks
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._cleanup_task: Optional[asyncio.Task] = None
@@ -111,6 +115,9 @@ class BluetoothManager:
             import uuid
             self._local_address = str(uuid.uuid4())[:17].replace("-", ":")
             
+            # Initialize BLE advertising
+            self._advertising = BLEAdvertising()
+            
             self._initialized = True
             return True
             
@@ -131,6 +138,15 @@ class BluetoothManager:
         
         self._running = True
         
+        # Start BLE advertising to make device discoverable
+        if self._advertising:
+            try:
+                await self._advertising.start_advertising()
+                logger.info("BLE advertising started - device is now discoverable")
+            except Exception as e:
+                logger.warning(f"Failed to start BLE advertising: {e}")
+                logger.info("Device discovery may be limited - other devices may not find this device")
+        
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
@@ -138,6 +154,13 @@ class BluetoothManager:
     async def stop(self) -> None:
         """Stop the Bluetooth manager and cleanup."""
         self._running = False
+        
+        # Stop BLE advertising
+        if self._advertising:
+            try:
+                await self._advertising.stop_advertising()
+            except Exception as e:
+                logger.warning(f"Failed to stop BLE advertising: {e}")
         
         # Cancel background tasks
         if self._heartbeat_task:
@@ -216,6 +239,14 @@ class BluetoothManager:
             )
             
             if client.is_connected:
+                # Verify device has our service UUID (check if it's an app device)
+                # Note: We're lenient here - if verification fails, we still allow connection
+                # This is because devices might not have the service set up yet
+                has_service = await self._verify_service_uuid(client)
+                if not has_service:
+                    logger.warning(f"Device {address} connected but doesn't have our service UUID. Connection allowed for now.")
+                    # Don't disconnect - allow connection and verify later during message exchange
+                
                 # Subscribe to notifications for receiving messages
                 try:
                     await self._setup_notifications(client, address)
@@ -318,6 +349,30 @@ class BluetoothManager:
                 del self._connections[address]
     
     # ==================== Data Transmission ====================
+    
+    async def _verify_service_uuid(self, client: BleakClient) -> bool:
+        """
+        Verify if a connected device has our service UUID.
+        
+        Args:
+            client: Connected BLE client.
+            
+        Returns:
+            True if device has our service UUID, False otherwise.
+        """
+        try:
+            services = await client.get_services()
+            target_uuid = BluetoothConstants.SERVICE_UUID.lower()
+            
+            for service in services:
+                service_uuid_str = str(service.uuid).lower()
+                if target_uuid in service_uuid_str:
+                    return True
+            return False
+        except Exception as e:
+            logger.warning(f"Error verifying service UUID: {e}")
+            # If we can't verify, assume it's OK (for compatibility)
+            return True
     
     async def _setup_notifications(self, client: BleakClient, address: str) -> None:
         """
@@ -544,12 +599,9 @@ class BluetoothManager:
         
         def detection_callback(device: BLEDevice, advertisement_data: AdvertisementData):
             """Callback for device detection."""
-            # Filter by service UUID if available
-            if advertisement_data.service_uuids:
-                if BluetoothConstants.SERVICE_UUID.lower() not in [
-                    uuid.lower() for uuid in advertisement_data.service_uuids
-                ]:
-                    return
+            # IMPORTANT: Discover ALL BLE devices, not just those with our service UUID
+            # This allows discovery even when devices aren't advertising yet
+            # We'll verify service UUID after connection attempt
             
             device_info = DeviceInfo(
                 address=device.address,
