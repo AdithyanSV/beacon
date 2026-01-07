@@ -77,6 +77,7 @@ class Application:
             logger.info("Initializing Bluetooth manager...")
             self._bluetooth_manager = BluetoothManager()
             try:
+                # Initialize Bluetooth (this is async, we're in async context)
                 await self._bluetooth_manager.initialize()
             except Exception as e:
                 logger.warning(f"Bluetooth initialization failed: {e}")
@@ -103,18 +104,10 @@ class Application:
             # Set up callbacks
             self._setup_callbacks()
             
-            # Start background services
-            if self._bluetooth_manager:
-                await self._bluetooth_manager.start()
-                logger.info("Bluetooth manager started")
+            # Note: Background services will be started after initialization
+            # in a persistent async runner to avoid eventlet conflicts
             
-            if self._discovery:
-                await self._discovery.start()
-                logger.info("Device discovery started")
-            
-            if self._connection_pool:
-                await self._connection_pool.start()
-                logger.info("Connection pool started")
+            logger.info("Components initialized, background services will start after initialization")
             
             # Set up web handlers
             set_bluetooth_manager(self._bluetooth_manager)
@@ -152,6 +145,9 @@ class Application:
             # Discovery callbacks
             self._discovery.set_app_device_found_callback(
                 self._on_app_device_found
+            )
+            self._discovery.set_device_found_callback(
+                self._on_device_found
             )
             self._discovery.set_device_lost_callback(
                 self._on_device_lost
@@ -232,14 +228,44 @@ class Application:
     
     async def _on_app_device_found(self, device_info):
         """Handle discovery of app device."""
-        logger.info(f"App device found: {device_info.address}")
+        logger.info(f"App device found: {device_info.address} (name: {device_info.name})")
         
         # Try to connect if not at capacity
-        if self._connection_pool.available_slots > 0:
+        if self._connection_pool and self._connection_pool.available_slots > 0:
             try:
-                await self._bluetooth_manager.connect_to_device(device_info.address)
+                logger.info(f"Attempting to connect to {device_info.address}...")
+                success = await self._bluetooth_manager.connect_to_device(device_info.address)
+                if success:
+                    logger.info(f"Successfully connected to {device_info.address}")
+                else:
+                    logger.warning(f"Connection to {device_info.address} failed")
             except Exception as e:
                 logger.warning(f"Failed to connect to {device_info.address}: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+    
+    async def _on_device_found(self, device_info):
+        """Handle discovery of any device - try to connect to all devices."""
+        logger.info(f"Device discovered: {device_info.address} (name: {device_info.name}, RSSI: {device_info.rssi})")
+        
+        # IMPORTANT: Try to connect to ALL discovered devices
+        # We'll verify if they're app devices after connection
+        if self._bluetooth_manager and self._connection_pool:
+            # Check if already connected
+            connected = await self._bluetooth_manager.get_connected_devices()
+            already_connected = any(d.address == device_info.address for d in connected)
+            
+            if not already_connected and self._connection_pool.available_slots > 0:
+                try:
+                    logger.info(f"Attempting connection to discovered device: {device_info.address}")
+                    success = await self._bluetooth_manager.connect_to_device(device_info.address)
+                    if success:
+                        logger.info(f"✓ Connected to {device_info.address}")
+                    else:
+                        logger.debug(f"Connection attempt to {device_info.address} returned False")
+                except Exception as e:
+                    logger.debug(f"Connection attempt to {device_info.address} failed: {e}")
+                    # Don't log as warning - this is expected for non-app devices
     
     async def _on_device_lost(self, device_info):
         """Handle device lost from discovery."""
@@ -275,6 +301,47 @@ class Application:
         
         logger.info("Starting application...")
         self._running = True
+        
+        # Start background async services in a separate thread
+        # This ensures they run in a persistent event loop
+        import threading
+        
+        def start_async_services():
+            """Start async services in a background thread."""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                async def start_all():
+                    if self._bluetooth_manager:
+                        await self._bluetooth_manager.start()
+                        logger.info("✓ Bluetooth manager started")
+                    
+                    if self._discovery:
+                        await self._discovery.start()
+                        logger.info("✓ Device discovery started")
+                    
+                    if self._connection_pool:
+                        await self._connection_pool.start()
+                        logger.info("✓ Connection pool started")
+                
+                loop.run_until_complete(start_all())
+                loop.run_forever()  # Keep loop running
+            except Exception as e:
+                logger.error(f"Error in async services thread: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+            finally:
+                loop.close()
+        
+        # Start async services in background thread
+        async_thread = threading.Thread(target=start_async_services, daemon=True)
+        async_thread.start()
+        logger.info("Async services thread started")
+        
+        # Give services a moment to start
+        import time
+        time.sleep(1)
         
         try:
             logger.info(f"Starting web server on {Config.web.HOST}:{Config.web.PORT}")

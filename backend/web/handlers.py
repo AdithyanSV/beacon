@@ -321,17 +321,31 @@ def handle_request_status():
     status = {
         'bluetooth': {
             'available': _bluetooth_manager is not None,
-            'running': _bluetooth_manager.is_running if _bluetooth_manager else False,
+            'running': False,
         },
         'messaging': {
             'available': _message_handler is not None,
         },
         'discovery': {
             'available': _discovery is not None,
-            'state': _discovery.state.name if _discovery else 'UNKNOWN',
+            'state': 'UNKNOWN',
         },
         'connected_clients': len(_connected_clients),
     }
+    
+    # Safely access attributes
+    if _bluetooth_manager:
+        try:
+            status['bluetooth']['running'] = getattr(_bluetooth_manager, 'is_running', False)
+        except Exception:
+            pass
+    
+    if _discovery:
+        try:
+            if hasattr(_discovery, 'state') and _discovery.state:
+                status['discovery']['state'] = _discovery.state.name
+        except Exception:
+            pass
     
     emit('status', status)
 

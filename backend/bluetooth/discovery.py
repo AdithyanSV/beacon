@@ -161,10 +161,16 @@ class DeviceDiscovery:
             self._stats.total_scans += 1
             self._stats.last_scan_time = time.time()
             
+            from utils.logger import get_logger
+            logger = get_logger(__name__)
+            logger.debug(f"Starting BLE scan (timeout: {timeout}s)")
+            
             scanner = BleakScanner(detection_callback=detection_callback)
             await scanner.start()
+            logger.debug("BLE scanner started, waiting for devices...")
             await asyncio.sleep(timeout)
             await scanner.stop()
+            logger.debug(f"BLE scan completed, found {len(discovered)} device(s) in callback")
             
             # Process discovered devices
             devices_found = []
@@ -241,27 +247,54 @@ class DeviceDiscovery:
     
     async def _scan_loop(self) -> None:
         """Main scan loop with adaptive intervals."""
+        from utils.logger import get_logger
+        logger = get_logger(__name__)
+        
+        logger.info("Discovery scan loop started")
+        scan_count = 0
+        
         while self._running:
             try:
+                scan_count += 1
+                logger.debug(f"Starting scan #{scan_count} (interval: {self._current_interval:.1f}s)")
+                
                 # Perform scan
-                await self.scan_once()
+                devices = await self.scan_once()
+                
+                if devices:
+                    logger.info(f"Scan #{scan_count}: Found {len(devices)} device(s)")
+                    for device in devices:
+                        logger.debug(f"  - {device.address} ({device.name or 'Unknown'}, RSSI: {device.rssi})")
+                else:
+                    logger.debug(f"Scan #{scan_count}: No devices found")
                 
                 # Check for lost devices
                 await self._check_lost_devices()
+                
+                # Log statistics
+                async with self._device_lock:
+                    total_devices = len(self._discovered_devices)
+                    app_devices = len(self._app_devices)
+                    logger.debug(f"Total discovered: {total_devices}, App devices: {app_devices}")
                 
                 # Wait for next scan
                 await asyncio.sleep(self._current_interval)
                 
             except asyncio.CancelledError:
+                logger.info("Discovery scan loop cancelled")
                 break
-            except BluetoothDiscoveryError:
+            except BluetoothDiscoveryError as e:
+                logger.warning(f"Discovery error: {e}")
                 # Increase interval on errors
                 self._current_interval = min(
                     self._current_interval * 1.5,
                     self._max_interval
                 )
                 await asyncio.sleep(self._current_interval)
-            except Exception:
+            except Exception as e:
+                logger.error(f"Unexpected error in scan loop: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
                 await asyncio.sleep(self._current_interval)
     
     async def _update_network_state(self) -> None:
