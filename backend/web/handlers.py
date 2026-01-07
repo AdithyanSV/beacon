@@ -145,6 +145,15 @@ def handle_connect():
         }
     })
     
+    # Send log buffer to new client
+    try:
+        from utils.websocket_log_handler import get_log_buffer
+        log_buffer = get_log_buffer()
+        for log_entry in log_buffer[-100:]:  # Send last 100 logs
+            emit('log_message', log_entry)
+    except Exception:
+        pass  # Don't fail if log handler not available
+    
     # Send current device list
     devices = _get_devices_sync()
     emit('devices_updated', {

@@ -163,23 +163,35 @@ class DeviceDiscovery:
             
             from utils.logger import get_logger
             logger = get_logger(__name__)
-            logger.debug(f"Starting BLE scan (timeout: {timeout}s)")
+            logger.info(f"🔍 Starting BLE scan (timeout: {timeout}s)")
+            logger.debug(f"Scan #{self._stats.total_scans} - Discovery state: {self._state.name}, Network state: {self._network_state.name}")
             
             scanner = BleakScanner(detection_callback=detection_callback)
             await scanner.start()
-            logger.debug("BLE scanner started, waiting for devices...")
+            logger.debug("✅ BLE scanner started successfully, waiting for devices...")
             await asyncio.sleep(timeout)
             await scanner.stop()
-            logger.debug(f"BLE scan completed, found {len(discovered)} device(s) in callback")
+            logger.info(f"📡 BLE scan completed - Found {len(discovered)} device(s) in callback")
             
             # Process discovered devices
             devices_found = []
+            from utils.logger import get_logger
+            logger = get_logger(__name__)
+            
             async with self._device_lock:
+                logger.debug(f"Processing {len(discovered)} discovered device(s)...")
                 for device_info, is_app_device in discovered:
                     address = device_info.address
+                    name = device_info.name or "Unknown"
+                    rssi = device_info.rssi or "N/A"
                     
                     # Check if this is a new device
                     is_new = address not in self._discovered_devices
+                    
+                    if is_new:
+                        logger.info(f"🆕 NEW DEVICE FOUND: {address} | Name: {name} | RSSI: {rssi} | App Device: {is_app_device}")
+                    else:
+                        logger.debug(f"📱 Device seen again: {address} | RSSI: {rssi}")
                     
                     # Update device cache
                     if address in self._discovered_devices:
@@ -194,11 +206,14 @@ class DeviceDiscovery:
                     # Track app devices
                     if is_app_device:
                         self._app_devices.add(address)
+                        logger.info(f"✅ App device identified: {address}")
                         if is_new and self._on_app_device_found:
+                            logger.info(f"🔔 Triggering app device found callback for {address}")
                             await self._safe_callback(self._on_app_device_found, device_info)
                     
                     # Notify general device found
                     if is_new and self._on_device_found:
+                        logger.info(f"🔔 Triggering device found callback for {address}")
                         await self._safe_callback(self._on_device_found, device_info)
                     
                     devices_found.append(device_info)
@@ -250,23 +265,25 @@ class DeviceDiscovery:
         from utils.logger import get_logger
         logger = get_logger(__name__)
         
-        logger.info("Discovery scan loop started")
+        logger.info("🚀 Discovery scan loop started")
+        logger.info(f"📊 Initial scan interval: {self._current_interval:.1f}s")
         scan_count = 0
         
         while self._running:
             try:
                 scan_count += 1
-                logger.debug(f"Starting scan #{scan_count} (interval: {self._current_interval:.1f}s)")
+                logger.info(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"🔍 SCAN #{scan_count} | Interval: {self._current_interval:.1f}s | State: {self._state.name}")
                 
                 # Perform scan
                 devices = await self.scan_once()
                 
                 if devices:
-                    logger.info(f"Scan #{scan_count}: Found {len(devices)} device(s)")
+                    logger.info(f"✅ Scan #{scan_count} COMPLETE: Found {len(devices)} device(s)")
                     for device in devices:
-                        logger.debug(f"  - {device.address} ({device.name or 'Unknown'}, RSSI: {device.rssi})")
+                        logger.info(f"   📱 {device.address} | {device.name or 'Unknown'} | RSSI: {device.rssi}")
                 else:
-                    logger.debug(f"Scan #{scan_count}: No devices found")
+                    logger.info(f"⚠️ Scan #{scan_count} COMPLETE: No devices found")
                 
                 # Check for lost devices
                 await self._check_lost_devices()
@@ -275,7 +292,7 @@ class DeviceDiscovery:
                 async with self._device_lock:
                     total_devices = len(self._discovered_devices)
                     app_devices = len(self._app_devices)
-                    logger.debug(f"Total discovered: {total_devices}, App devices: {app_devices}")
+                    logger.info(f"📊 STATS: Total discovered: {total_devices} | App devices: {app_devices} | Empty scans: {self._stats.consecutive_empty_scans}")
                 
                 # Wait for next scan
                 await asyncio.sleep(self._current_interval)

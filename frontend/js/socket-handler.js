@@ -143,6 +143,14 @@ const SocketHandler = {
                 this.callbacks.onError(data);
             }
         });
+        
+        // Log messages from server
+        this.socket.on('log_message', (logData) => {
+            console.log('[LOG]', logData);
+            if (typeof LogViewer !== 'undefined' && LogViewer.addLog) {
+                LogViewer.addLog(logData);
+            }
+        });
     },
 
     /**

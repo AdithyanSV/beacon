@@ -232,20 +232,30 @@ class BluetoothManager:
             device_info.connection_attempts += 1
         
         try:
+            logger.info(f"🔌 Attempting to connect to device: {address}")
+            logger.debug(f"Connection timeout: {Config.bluetooth.CONNECTION_TIMEOUT}s")
+            
             client = BleakClient(address)
             await asyncio.wait_for(
                 client.connect(),
                 timeout=Config.bluetooth.CONNECTION_TIMEOUT
             )
             
+            logger.debug(f"Connection attempt completed, checking if connected...")
+            
             if client.is_connected:
+                logger.info(f"✅ Successfully connected to {address}")
+                
                 # Verify device has our service UUID (check if it's an app device)
                 # Note: We're lenient here - if verification fails, we still allow connection
                 # This is because devices might not have the service set up yet
+                logger.debug(f"🔍 Verifying service UUID for {address}...")
                 has_service = await self._verify_service_uuid(client)
                 if not has_service:
-                    logger.warning(f"Device {address} connected but doesn't have our service UUID. Connection allowed for now.")
+                    logger.warning(f"⚠️ Device {address} connected but doesn't have our service UUID. Connection allowed for now.")
                     # Don't disconnect - allow connection and verify later during message exchange
+                else:
+                    logger.info(f"✅ Service UUID verified for {address} - this is an app device")
                 
                 # Subscribe to notifications for receiving messages
                 try:

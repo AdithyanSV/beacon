@@ -151,10 +151,12 @@ def setup_logging() -> None:
         root_logger.addHandler(file_handler)
     
     # Set level for third-party loggers
-    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+    # Set to DEBUG for detailed troubleshooting, WARNING for production
+    werkzeug_level = logging.DEBUG if log_level == logging.DEBUG else logging.WARNING
+    logging.getLogger('werkzeug').setLevel(werkzeug_level)
     logging.getLogger('engineio').setLevel(logging.WARNING)
     logging.getLogger('socketio').setLevel(logging.WARNING)
-    logging.getLogger('bleak').setLevel(logging.WARNING)
+    logging.getLogger('bleak').setLevel(logging.DEBUG if log_level == logging.DEBUG else logging.WARNING)
 
 
 def get_logger(name: str, context: Dict[str, Any] = None) -> ContextLogger:

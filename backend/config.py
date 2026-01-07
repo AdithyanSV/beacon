@@ -132,8 +132,9 @@ class SecurityConfig:
 class LogConfig:
     """Logging configuration."""
     
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FORMAT = os.getenv("LOG_FORMAT", "json")  # "json" or "text"
+    # Set to DEBUG for detailed logging (change to INFO for production)
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")  # Changed to DEBUG for troubleshooting
+    LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # Changed to "text" for better readability
     LOG_FILE = os.getenv("LOG_FILE", None)  # Optional file path
     
     # Security logging

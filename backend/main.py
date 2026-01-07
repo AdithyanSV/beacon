@@ -21,6 +21,7 @@ eventlet.monkey_patch()
 from config import Config
 from utils.logger import setup_logging, get_logger
 from utils.resource_monitor import ResourceMonitor
+from utils.websocket_log_handler import setup_websocket_logging
 from bluetooth.manager import BluetoothManager
 from bluetooth.discovery import DeviceDiscovery
 from bluetooth.connection_pool import ConnectionPool
@@ -37,6 +38,8 @@ from web.handlers import (
 # Set up logging
 setup_logging()
 logger = get_logger(__name__)
+
+# Set up WebSocket logging (will be initialized after socketio is created)
 
 
 class Application:
@@ -116,6 +119,10 @@ class Application:
             
             # Create Flask app
             self._app = create_app()
+            
+            # Set up WebSocket logging for real-time log streaming to frontend
+            setup_websocket_logging(socketio)
+            logger.info("WebSocket logging enabled - logs will stream to frontend")
             
             logger.info("Application initialized successfully")
             return True
@@ -228,25 +235,32 @@ class Application:
     
     async def _on_app_device_found(self, device_info):
         """Handle discovery of app device."""
-        logger.info(f"App device found: {device_info.address} (name: {device_info.name})")
+        logger.info(f"🎉 APP DEVICE FOUND: {device_info.address}")
+        logger.info(f"   Name: {device_info.name or 'Unknown'}")
+        logger.info(f"   This device is running our application!")
         
         # Try to connect if not at capacity
         if self._connection_pool and self._connection_pool.available_slots > 0:
             try:
-                logger.info(f"Attempting to connect to {device_info.address}...")
+                logger.info(f"🔌 Connecting to app device {device_info.address}...")
                 success = await self._bluetooth_manager.connect_to_device(device_info.address)
                 if success:
-                    logger.info(f"Successfully connected to {device_info.address}")
+                    logger.info(f"✅✅✅ SUCCESSFULLY CONNECTED TO APP DEVICE: {device_info.address}")
                 else:
-                    logger.warning(f"Connection to {device_info.address} failed")
+                    logger.warning(f"❌ Connection to app device {device_info.address} failed")
             except Exception as e:
-                logger.warning(f"Failed to connect to {device_info.address}: {e}")
+                logger.error(f"❌ Failed to connect to app device {device_info.address}: {e}")
                 import traceback
                 logger.debug(traceback.format_exc())
+        else:
+            logger.warning(f"⚠️ Cannot connect to {device_info.address}: Connection pool full")
     
     async def _on_device_found(self, device_info):
         """Handle discovery of any device - try to connect to all devices."""
-        logger.info(f"Device discovered: {device_info.address} (name: {device_info.name}, RSSI: {device_info.rssi})")
+        logger.info(f"🎯 DEVICE DISCOVERED: {device_info.address}")
+        logger.info(f"   Name: {device_info.name or 'Unknown'}")
+        logger.info(f"   RSSI: {device_info.rssi}")
+        logger.info(f"   State: {device_info.state.name}")
         
         # IMPORTANT: Try to connect to ALL discovered devices
         # We'll verify if they're app devices after connection
@@ -255,17 +269,23 @@ class Application:
             connected = await self._bluetooth_manager.get_connected_devices()
             already_connected = any(d.address == device_info.address for d in connected)
             
-            if not already_connected and self._connection_pool.available_slots > 0:
+            if already_connected:
+                logger.info(f"⏭️ Device {device_info.address} already connected, skipping")
+            elif self._connection_pool.available_slots <= 0:
+                logger.warning(f"⚠️ Connection pool full ({self._connection_pool.available_slots} slots), cannot connect to {device_info.address}")
+            else:
                 try:
-                    logger.info(f"Attempting connection to discovered device: {device_info.address}")
+                    logger.info(f"🔌 INITIATING CONNECTION to {device_info.address}...")
+                    logger.info(f"   Available slots: {self._connection_pool.available_slots}")
                     success = await self._bluetooth_manager.connect_to_device(device_info.address)
                     if success:
-                        logger.info(f"✓ Connected to {device_info.address}")
+                        logger.info(f"✅✅✅ CONNECTION SUCCESSFUL: {device_info.address}")
                     else:
-                        logger.debug(f"Connection attempt to {device_info.address} returned False")
+                        logger.warning(f"❌ Connection attempt to {device_info.address} returned False")
                 except Exception as e:
-                    logger.debug(f"Connection attempt to {device_info.address} failed: {e}")
-                    # Don't log as warning - this is expected for non-app devices
+                    logger.warning(f"❌ Connection attempt to {device_info.address} failed: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
     
     async def _on_device_lost(self, device_info):
         """Handle device lost from discovery."""
