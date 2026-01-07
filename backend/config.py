@@ -1,7 +1,7 @@
 """
 Configuration settings for Bluetooth Mesh Broadcast Application.
 
-Includes safety settings, optimization settings, resource limits, and security settings.
+Terminal CLI Edition - Web server configuration removed.
 All values can be overridden via environment variables.
 """
 
@@ -82,25 +82,6 @@ class MessageConfig:
     RATE_LIMIT_GLOBAL = get_int_env("RATE_LIMIT_GLOBAL", 100)  # messages/minute
 
 
-class WebConfig:
-    """Web server configuration."""
-    
-    HOST = os.getenv("HOST", "localhost")
-    PORT = get_int_env("PORT", 5000)
-    DEBUG = get_bool_env("DEBUG", True)
-    SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
-    
-    # SocketIO settings - using aiohttp async mode
-    SOCKETIO_ASYNC_MODE = "aiohttp"
-    
-    # Security
-    ALLOWED_ORIGINS = get_list_env(
-        "ALLOWED_ORIGINS",
-        ["http://localhost:5000", "http://127.0.0.1:5000", "*"]
-    )
-    MAX_WEBSOCKET_CONNECTIONS = get_int_env("MAX_WEBSOCKET_CONNECTIONS", 10)  # per device
-
-
 class ResourceConfig:
     """Resource management configuration."""
     
@@ -132,9 +113,8 @@ class SecurityConfig:
 class LogConfig:
     """Logging configuration."""
     
-    # Set to DEBUG for detailed logging (change to INFO for production)
-    LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG")  # Changed to DEBUG for troubleshooting
-    LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # Changed to "text" for better readability
+    LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+    LOG_FORMAT = os.getenv("LOG_FORMAT", "text")
     LOG_FILE = os.getenv("LOG_FILE", None)  # Optional file path
     
     # Security logging
@@ -143,8 +123,23 @@ class LogConfig:
     LOG_MESSAGE_EVENTS = get_bool_env("LOG_MESSAGE_EVENTS", False)  # Disabled by default for privacy
 
 
+class TerminalConfig:
+    """Terminal UI configuration."""
+    
+    # Display settings
+    MAX_DISPLAYED_MESSAGES = get_int_env("MAX_DISPLAYED_MESSAGES", 50)
+    SHOW_DEBUG = get_bool_env("SHOW_DEBUG", False)
+    COLOR_OUTPUT = get_bool_env("COLOR_OUTPUT", True)
+    
+    # Auto-connect behavior
+    AUTO_CONNECT = get_bool_env("AUTO_CONNECT", True)
+    
+    # Prompt
+    PROMPT = os.getenv("PROMPT", "> ")
+
+
 class UIConfig:
-    """UI-related configuration."""
+    """UI-related configuration (for compatibility)."""
     
     MAX_DISPLAYED_MESSAGES = get_int_env("MAX_DISPLAYED_MESSAGES", 50)
     AUTO_SCROLL = True
@@ -159,10 +154,10 @@ class Config:
     
     bluetooth = BluetoothConfig
     message = MessageConfig
-    web = WebConfig
     resource = ResourceConfig
     security = SecurityConfig
     log = LogConfig
+    terminal = TerminalConfig
     ui = UIConfig
     
     @classmethod

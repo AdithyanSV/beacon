@@ -1,63 +1,56 @@
 """
-Structured Logging Configuration.
+Simple Logging Configuration for Terminal CLI.
 
-Provides consistent logging throughout the application with:
-- Structured JSON logging option
-- Security-aware logging (no sensitive data)
-- Log level configuration
+Provides consistent logging throughout the application.
+Simplified from the web version - no SocketIO or web-specific logging.
 """
 
 import logging
 import sys
 from typing import Optional, Any, Dict
-import json
 from datetime import datetime
 
 from config import Config
 
 
-class JSONFormatter(logging.Formatter):
+class SimpleFormatter(logging.Formatter):
     """
-    Custom JSON formatter for structured logging.
-    """
-    
-    def format(self, record: logging.LogRecord) -> str:
-        """Format log record as JSON."""
-        log_data = {
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
-            'level': record.levelname,
-            'logger': record.name,
-            'message': record.getMessage(),
-        }
-        
-        # Add exception info if present
-        if record.exc_info:
-            log_data['exception'] = self.formatException(record.exc_info)
-        
-        # Add extra fields
-        if hasattr(record, 'extra_data'):
-            log_data['data'] = record.extra_data
-        
-        # Add source location
-        log_data['source'] = {
-            'file': record.filename,
-            'line': record.lineno,
-            'function': record.funcName,
-        }
-        
-        return json.dumps(log_data)
-
-
-class TextFormatter(logging.Formatter):
-    """
-    Human-readable text formatter.
+    Simple text formatter for terminal output.
     """
     
-    def __init__(self):
+    # ANSI colors
+    COLORS = {
+        'DEBUG': '\033[36m',     # Cyan
+        'INFO': '\033[32m',      # Green
+        'WARNING': '\033[33m',   # Yellow
+        'ERROR': '\033[31m',     # Red
+        'CRITICAL': '\033[35m',  # Magenta
+        'RESET': '\033[0m',
+    }
+    
+    def __init__(self, use_colors: bool = True):
         super().__init__(
             fmt='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            datefmt='%H:%M:%S'
         )
+        self.use_colors = use_colors and sys.stdout.isatty()
+    
+    def format(self, record: logging.LogRecord) -> str:
+        """Format log record with optional colors."""
+        # Save original levelname
+        original_levelname = record.levelname
+        
+        if self.use_colors:
+            color = self.COLORS.get(record.levelname, '')
+            reset = self.COLORS['RESET']
+            record.levelname = f"{color}{record.levelname}{reset}"
+        
+        result = super().format(record)
+        
+        # Restore original levelname
+        record.levelname = original_levelname
+        
+        return result
 
 
 class SecurityFilter(logging.Filter):
@@ -72,11 +65,9 @@ class SecurityFilter(logging.Filter):
     
     def filter(self, record: logging.LogRecord) -> bool:
         """Filter and redact sensitive data."""
-        # Redact sensitive data in message
         message = record.getMessage()
         for field in self.SENSITIVE_FIELDS:
             if field.lower() in message.lower():
-                # Simple redaction - replace values after = or :
                 import re
                 pattern = rf'({field}["\']?\s*[:=]\s*["\']?)([^"\'\s,}}]+)'
                 record.msg = re.sub(
@@ -85,7 +76,6 @@ class SecurityFilter(logging.Filter):
                     str(record.msg),
                     flags=re.IGNORECASE
                 )
-        
         return True
 
 
@@ -99,9 +89,9 @@ class ContextLogger(logging.LoggerAdapter):
     
     def process(self, msg: str, kwargs: Dict[str, Any]) -> tuple:
         """Add context to log message."""
-        extra = kwargs.get('extra', {})
-        extra['extra_data'] = {**self.extra, **extra.get('extra_data', {})}
-        kwargs['extra'] = extra
+        if self.extra:
+            context_str = ' '.join(f'{k}={v}' for k, v in self.extra.items())
+            msg = f"{msg} [{context_str}]"
         return msg, kwargs
     
     def with_context(self, **context) -> 'ContextLogger':
@@ -128,12 +118,9 @@ def setup_logging() -> None:
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     
-    # Set formatter based on config
-    if Config.log.LOG_FORMAT.lower() == 'json':
-        formatter = JSONFormatter()
-    else:
-        formatter = TextFormatter()
-    
+    # Set formatter
+    use_colors = Config.terminal.COLOR_OUTPUT if hasattr(Config, 'terminal') else True
+    formatter = SimpleFormatter(use_colors=use_colors)
     console_handler.setFormatter(formatter)
     
     # Add security filter
@@ -146,17 +133,14 @@ def setup_logging() -> None:
     if Config.log.LOG_FILE:
         file_handler = logging.FileHandler(Config.log.LOG_FILE)
         file_handler.setLevel(log_level)
-        file_handler.setFormatter(formatter)
+        file_handler.setFormatter(SimpleFormatter(use_colors=False))
         file_handler.addFilter(SecurityFilter())
         root_logger.addHandler(file_handler)
     
-    # Set level for third-party loggers
-    # Set to DEBUG for detailed troubleshooting, WARNING for production
-    werkzeug_level = logging.DEBUG if log_level == logging.DEBUG else logging.WARNING
-    logging.getLogger('werkzeug').setLevel(werkzeug_level)
-    logging.getLogger('engineio').setLevel(logging.WARNING)
-    logging.getLogger('socketio').setLevel(logging.WARNING)
-    logging.getLogger('bleak').setLevel(logging.DEBUG if log_level == logging.DEBUG else logging.WARNING)
+    # Set level for third-party loggers to reduce noise
+    logging.getLogger('bleak').setLevel(logging.WARNING)
+    logging.getLogger('bless').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)
 
 
 def get_logger(name: str, context: Dict[str, Any] = None) -> ContextLogger:
@@ -174,7 +158,7 @@ def get_logger(name: str, context: Dict[str, Any] = None) -> ContextLogger:
     return ContextLogger(logger, context)
 
 
-# Convenience functions for security logging
+# Convenience functions for event logging
 
 def log_security_event(
     event_type: str,
@@ -184,12 +168,6 @@ def log_security_event(
 ) -> None:
     """
     Log a security-related event.
-    
-    Args:
-        event_type: Type of security event.
-        message: Event description.
-        severity: Log level (INFO, WARNING, ERROR).
-        **context: Additional context.
     """
     if not Config.log.LOG_SECURITY_EVENTS:
         return
@@ -207,12 +185,6 @@ def log_connection_event(
 ) -> None:
     """
     Log a connection-related event.
-    
-    Args:
-        event_type: Type of connection event.
-        device_address: Device address.
-        message: Event description.
-        **context: Additional context.
     """
     if not Config.log.LOG_CONNECTION_EVENTS:
         return
@@ -233,12 +205,6 @@ def log_message_event(
 ) -> None:
     """
     Log a message-related event.
-    
-    Args:
-        event_type: Type of message event.
-        message_id: Message ID.
-        description: Event description.
-        **context: Additional context.
     """
     if not Config.log.LOG_MESSAGE_EVENTS:
         return

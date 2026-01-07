@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bluetooth Mesh Broadcast Application - Startup Script
-# Version 2.0 - Pure asyncio architecture
+# Terminal CLI Edition
 # Run with: ./start.sh
 
 set -e  # Exit on error
@@ -19,7 +19,7 @@ cd "$SCRIPT_DIR"
 echo -e "${CYAN}"
 echo "=========================================="
 echo "Bluetooth Mesh Broadcast Application"
-echo "Version 2.0.0 - Pure Asyncio"
+echo "Terminal CLI Edition"
 echo "=========================================="
 echo -e "${NC}"
 
@@ -43,7 +43,7 @@ else
 fi
 
 # Check if dependencies need updating
-if ! python -c "import aiohttp" 2>/dev/null; then
+if ! python -c "import bleak" 2>/dev/null; then
     echo -e "${YELLOW}Dependencies not installed or need updating...${NC}"
     pip install --upgrade pip
     pip install -r requirements.txt
@@ -93,12 +93,12 @@ cd backend
 # Start the application
 echo -e "${CYAN}"
 echo "=========================================="
-echo "Starting Application..."
+echo "Starting Terminal Application..."
 echo "=========================================="
 echo -e "${NC}"
-echo -e "${GREEN}Application will be available at: http://localhost:5000${NC}"
+echo -e "${GREEN}Type 'help' for available commands${NC}"
 echo -e "${GREEN}Press Ctrl+C to stop${NC}"
 echo ""
 
-# Run the application with Python asyncio
-python main.py
+# Run the CLI application
+python main_cli.py

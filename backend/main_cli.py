@@ -1,0 +1,584 @@
+"""
+Bluetooth Mesh Broadcast Application - Terminal CLI Entry Point
+
+Pure asyncio architecture for terminal-based mesh networking.
+No web server, no async/sync mixing - just clean async code.
+"""
+
+import asyncio
+import signal
+import sys
+import os
+from typing import Optional
+
+# Add backend directory to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from config import Config
+from cli.terminal import TerminalUI
+from bluetooth.manager import BluetoothManager
+from bluetooth.discovery import DeviceDiscovery
+from bluetooth.gatt_server import BLEGATTServer
+from bluetooth.connection_pool import ConnectionPool
+from messaging.handler import MessageHandler
+
+
+class Application:
+    """
+    Main application class coordinating all components.
+    
+    Pure asyncio architecture with terminal interface.
+    """
+    
+    def __init__(self):
+        self._running = False
+        self._shutdown_event = asyncio.Event()
+        
+        # Terminal UI
+        self._terminal: Optional[TerminalUI] = None
+        
+        # Bluetooth components
+        self._bluetooth_manager: Optional[BluetoothManager] = None
+        self._discovery: Optional[DeviceDiscovery] = None
+        self._gatt_server: Optional[BLEGATTServer] = None
+        self._connection_pool: Optional[ConnectionPool] = None
+        
+        # Messaging
+        self._message_handler: Optional[MessageHandler] = None
+    
+    async def initialize(self) -> bool:
+        """Initialize all application components."""
+        try:
+            # Create terminal UI
+            self._terminal = TerminalUI()
+            self._terminal.print_banner()
+            
+            print("[INIT] Validating configuration...")
+            if not Config.validate():
+                print("[ERROR] Configuration validation failed")
+                return False
+            
+            # Initialize Bluetooth Manager
+            print("[INIT] Initializing Bluetooth manager...")
+            self._bluetooth_manager = BluetoothManager()
+            try:
+                await self._bluetooth_manager.initialize()
+                print("[OK] Bluetooth manager initialized")
+            except Exception as e:
+                print(f"[WARN] Bluetooth initialization failed: {e}")
+                print("[INFO] Continuing without Bluetooth client support...")
+            
+            # Initialize GATT Server
+            print("[INIT] Initializing GATT server...")
+            self._gatt_server = BLEGATTServer()
+            self._gatt_server.set_message_received_callback(self._on_gatt_message_received)
+            
+            # Initialize Discovery
+            print("[INIT] Initializing device discovery...")
+            self._discovery = DeviceDiscovery(self._bluetooth_manager)
+            
+            # Initialize Connection Pool
+            print("[INIT] Initializing connection pool...")
+            self._connection_pool = ConnectionPool()
+            
+            # Initialize Message Handler
+            print("[INIT] Initializing message handler...")
+            local_id = self._bluetooth_manager.local_address if self._bluetooth_manager else "local"
+            self._message_handler = MessageHandler(local_device_id=local_id)
+            
+            # Set up callbacks
+            self._setup_callbacks()
+            
+            # Set up terminal command handlers
+            self._setup_terminal_handlers()
+            
+            print("[OK] Application initialized successfully")
+            return True
+            
+        except Exception as e:
+            print(f"[ERROR] Initialization failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def _setup_callbacks(self):
+        """Set up callbacks between components."""
+        if self._bluetooth_manager:
+            self._bluetooth_manager.set_device_connected_callback(self._on_device_connected)
+            self._bluetooth_manager.set_device_disconnected_callback(self._on_device_disconnected)
+            self._bluetooth_manager.set_message_callback(self._on_bluetooth_message)
+        
+        if self._discovery:
+            self._discovery.set_app_device_found_callback(self._on_app_device_found)
+            self._discovery.set_device_found_callback(self._on_device_found)
+            self._discovery.set_device_lost_callback(self._on_device_lost)
+        
+        if self._message_handler:
+            self._message_handler.set_message_received_callback(self._on_message_received)
+    
+    def _setup_terminal_handlers(self):
+        """Set up terminal command handlers."""
+        self._terminal.set_send_handler(self._handle_send)
+        self._terminal.set_list_handler(self._handle_list)
+        self._terminal.set_scan_handler(self._handle_scan)
+        self._terminal.set_connect_handler(self._handle_connect)
+        self._terminal.set_disconnect_handler(self._handle_disconnect)
+        self._terminal.set_status_handler(self._handle_status)
+        self._terminal.set_stats_handler(self._handle_stats)
+        self._terminal.set_quit_handler(self._handle_quit)
+    
+    # ==================== Command Handlers ====================
+    
+    async def _handle_send(self, content: str):
+        """Handle send command."""
+        if not self._message_handler:
+            self._terminal.print_error("Message handler not available")
+            return
+        
+        try:
+            # Create message
+            message = await self._message_handler.create_message(
+                content=content,
+                sender_name="You"
+            )
+            
+            # Get connected devices
+            connected_addresses = []
+            if self._bluetooth_manager:
+                devices = await self._bluetooth_manager.get_connected_devices()
+                connected_addresses = [d.address for d in devices]
+            
+            # Send through message handler
+            targets = await self._message_handler.send_message(message, connected_addresses)
+            
+            # Send via Bluetooth
+            sent_count = 0
+            if self._bluetooth_manager and targets:
+                message_bytes = message.to_bytes()
+                for target in targets:
+                    try:
+                        success = await self._bluetooth_manager.send_data(target, message_bytes)
+                        if success:
+                            sent_count += 1
+                    except Exception:
+                        pass
+            
+            # Also broadcast via GATT server
+            if self._gatt_server and self._gatt_server.is_running:
+                try:
+                    await self._gatt_server.broadcast_message(message.to_dict())
+                except Exception:
+                    pass
+            
+            # Show own message
+            self._terminal.print_message(
+                sender="You",
+                content=content,
+                timestamp=message.timestamp,
+                is_own=True
+            )
+            
+            if sent_count > 0:
+                self._terminal.print_success(f"Message sent to {sent_count} device(s)")
+            elif connected_addresses:
+                self._terminal.print_warning("Message queued but no devices received it")
+            else:
+                self._terminal.print_info("Message created (no devices connected)")
+            
+        except Exception as e:
+            self._terminal.print_error(f"Failed to send message: {e}")
+    
+    async def _handle_list(self):
+        """Handle list command."""
+        connected = []
+        discovered = []
+        
+        if self._bluetooth_manager:
+            devices = await self._bluetooth_manager.get_connected_devices()
+            connected = [d.to_dict() if hasattr(d, 'to_dict') else {"address": str(d)} for d in devices]
+        
+        if self._discovery:
+            app_devices = await self._discovery.get_app_devices()
+            discovered = [d.to_dict() if hasattr(d, 'to_dict') else {"address": str(d)} for d in app_devices]
+        
+        self._terminal.print_devices_list(connected, discovered)
+    
+    async def _handle_scan(self):
+        """Handle scan command."""
+        if not self._discovery:
+            self._terminal.print_error("Discovery not available")
+            return
+        
+        self._terminal.print_info("Starting device scan...")
+        self._discovery.force_scan()
+        
+        try:
+            devices = await self._discovery.scan_once(timeout=5.0)
+            if devices:
+                self._terminal.print_success(f"Found {len(devices)} new device(s)")
+            else:
+                self._terminal.print_info("No new devices found")
+        except Exception as e:
+            self._terminal.print_error(f"Scan failed: {e}")
+    
+    async def _handle_connect(self, address: str):
+        """Handle connect command."""
+        if not self._bluetooth_manager:
+            self._terminal.print_error("Bluetooth manager not available")
+            return
+        
+        self._terminal.print_info(f"Connecting to {address}...")
+        
+        try:
+            success = await self._bluetooth_manager.connect_to_device(address)
+            if success:
+                self._terminal.print_success(f"Connected to {address}")
+            else:
+                self._terminal.print_error(f"Failed to connect to {address}")
+        except Exception as e:
+            self._terminal.print_error(f"Connection error: {e}")
+    
+    async def _handle_disconnect(self, address: str):
+        """Handle disconnect command."""
+        if not self._bluetooth_manager:
+            self._terminal.print_error("Bluetooth manager not available")
+            return
+        
+        try:
+            success = await self._bluetooth_manager.disconnect_device(address)
+            if success:
+                self._terminal.print_success(f"Disconnected from {address}")
+            else:
+                self._terminal.print_error(f"Device {address} was not connected")
+        except Exception as e:
+            self._terminal.print_error(f"Disconnect error: {e}")
+    
+    async def _handle_status(self):
+        """Handle status command - includes discovery stats."""
+        # Bluetooth status
+        bt_running = self._bluetooth_manager.is_running if self._bluetooth_manager else False
+        bt_connected = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+        
+        # GATT status
+        gatt_running = self._gatt_server.is_running if self._gatt_server else False
+        
+        # Discovery status and stats
+        discovery_status = {
+            "state": "N/A",
+            "network_state": "N/A",
+            "app_devices": 0,
+            "total_scans": 0,
+            "successful_scans": 0,
+            "devices_found": 0,
+            "consecutive_empty_scans": 0,
+            "current_interval": 0.0,
+        }
+        
+        if self._discovery:
+            stats = self._discovery.stats
+            app_devices = await self._discovery.get_app_devices()
+            
+            discovery_status.update(
+                {
+                    "state": self._discovery.state.name,
+                    "network_state": self._discovery.network_state.name,
+                    "app_devices": len(app_devices),
+                    "total_scans": stats.total_scans,
+                    "successful_scans": stats.successful_scans,
+                    "devices_found": stats.devices_found,
+                    "consecutive_empty_scans": stats.consecutive_empty_scans,
+                    "current_interval": self._discovery.current_interval,
+                }
+            )
+        
+        status = {
+            "bluetooth": {
+                "running": bt_running,
+                "connected": bt_connected,
+                "max": Config.bluetooth.MAX_CONCURRENT_CONNECTIONS,
+            },
+            "gatt_server": {
+                "running": gatt_running,
+            },
+            "discovery": discovery_status,
+        }
+        
+        self._terminal.print_status(status)
+    
+    async def _handle_stats(self):
+        """Handle stats command."""
+        stats = {
+            "messages": {},
+            "router": {},
+        }
+        
+        if self._message_handler:
+            msg_stats = self._message_handler.stats
+            stats["messages"] = {
+                "sent": msg_stats.total_sent,
+                "received": msg_stats.total_received,
+                "forwarded": msg_stats.total_forwarded,
+            }
+            
+            router_stats = self._message_handler.get_router_stats()
+            stats["router"] = {
+                "dropped_duplicate": router_stats.get("messages_dropped_duplicate", 0),
+                "dropped_ttl": router_stats.get("messages_dropped_ttl", 0),
+                "cache_size": router_stats.get("cache_size", 0),
+            }
+        
+        self._terminal.print_stats(stats)
+    
+    async def _handle_quit(self):
+        """Handle quit command."""
+        await self.stop()
+    
+    # ==================== Bluetooth Callbacks ====================
+    
+    async def _on_device_connected(self, device_info):
+        """Handle device connection."""
+        self._terminal.print_device_connected(
+            address=device_info.address,
+            name=device_info.name
+        )
+        
+        if self._connection_pool:
+            await self._connection_pool.add_connection(device_info.address, device_info)
+    
+    async def _on_device_disconnected(self, device_info):
+        """Handle device disconnection."""
+        self._terminal.print_device_disconnected(
+            address=device_info.address,
+            name=device_info.name
+        )
+        
+        if self._connection_pool:
+            await self._connection_pool.remove_connection(device_info.address)
+    
+    async def _on_bluetooth_message(self, address: str, data: dict):
+        """Handle incoming Bluetooth message."""
+        try:
+            import json
+            if isinstance(data, dict):
+                message_bytes = json.dumps(data).encode('utf-8')
+            elif isinstance(data, bytes):
+                message_bytes = data
+            else:
+                message_bytes = str(data).encode('utf-8')
+            
+            connected = await self._bluetooth_manager.get_connected_devices() if self._bluetooth_manager else []
+            connected_addresses = [d.address for d in connected]
+            
+            message, forward_to = await self._message_handler.receive_message(
+                message_bytes,
+                source_device=address,
+                connected_devices=connected_addresses
+            )
+            
+            # Forward if needed
+            if forward_to and message:
+                forward_data = await self._message_handler.prepare_for_forwarding(message)
+                if forward_data:
+                    for target in forward_to:
+                        await self._bluetooth_manager.send_data(target, forward_data)
+        except Exception as e:
+            self._terminal.print_error(f"Error processing message: {e}")
+    
+    async def _on_gatt_message_received(self, client_address: str, data: bytes):
+        """Handle message received via GATT server."""
+        try:
+            connected = await self._bluetooth_manager.get_connected_devices() if self._bluetooth_manager else []
+            connected_addresses = [d.address for d in connected]
+            
+            message, forward_to = await self._message_handler.receive_message(
+                data,
+                source_device=client_address,
+                connected_devices=connected_addresses
+            )
+            
+            # Forward if needed
+            if forward_to and message:
+                forward_data = await self._message_handler.prepare_for_forwarding(message)
+                if forward_data:
+                    if self._bluetooth_manager:
+                        for target in forward_to:
+                            await self._bluetooth_manager.send_data(target, forward_data)
+                    if self._gatt_server:
+                        await self._gatt_server.send_notification(forward_data)
+        except Exception as e:
+            self._terminal.print_error(f"Error processing GATT message: {e}")
+    
+    async def _on_app_device_found(self, device_info):
+        """Handle app device discovery."""
+        self._terminal.print_device_found(
+            address=device_info.address,
+            name=device_info.name,
+            rssi=device_info.rssi,
+            is_app=True
+        )
+        
+        # Auto-connect if we have available slots
+        if self._connection_pool and self._connection_pool.available_slots > 0:
+            self._terminal.print_info(f"Auto-connecting to {device_info.address}...")
+            try:
+                success = await self._bluetooth_manager.connect_to_device(device_info.address)
+                if not success:
+                    self._terminal.print_warning(f"Auto-connect to {device_info.address} failed")
+            except Exception as e:
+                self._terminal.print_warning(f"Auto-connect error: {e}")
+    
+    async def _on_device_found(self, device_info):
+        """Handle general device discovery."""
+        # Only show in debug mode to avoid spam
+        self._terminal.print_debug(
+            f"Device: {device_info.address} | {device_info.name or 'Unknown'}"
+        )
+    
+    async def _on_device_lost(self, device_info):
+        """Handle device lost."""
+        self._terminal.print_debug(f"Device lost: {device_info.address}")
+    
+    async def _on_message_received(self, message):
+        """Handle received message for display."""
+        self._terminal.print_message(
+            sender=message.sender_name or message.sender_id[:8],
+            content=message.content,
+            timestamp=message.timestamp,
+            is_own=False
+        )
+    
+    # ==================== Lifecycle ====================
+    
+    async def start(self):
+        """Start the application."""
+        if self._running:
+            return
+        
+        self._running = True
+        print()
+        print("[START] Starting components...")
+        
+        # Start GATT server
+        if self._gatt_server:
+            try:
+                await self._gatt_server.start()
+                print("[OK] GATT server started")
+            except Exception as e:
+                print(f"[WARN] GATT server failed: {e}")
+        
+        # Start Bluetooth manager
+        if self._bluetooth_manager:
+            try:
+                await self._bluetooth_manager.start()
+                print("[OK] Bluetooth manager started")
+            except Exception as e:
+                print(f"[WARN] Bluetooth manager failed: {e}")
+        
+        # Start discovery
+        if self._discovery:
+            try:
+                await self._discovery.start()
+                print("[OK] Discovery started")
+            except Exception as e:
+                print(f"[WARN] Discovery failed: {e}")
+        
+        # Start connection pool
+        if self._connection_pool:
+            try:
+                await self._connection_pool.start()
+                print("[OK] Connection pool started")
+            except Exception as e:
+                print(f"[WARN] Connection pool failed: {e}")
+        
+        print()
+        print("=" * 50)
+        print("APPLICATION RUNNING")
+        print(f"  GATT Server: {'Running' if self._gatt_server and self._gatt_server.is_running else 'Not running'}")
+        print(f"  Discovery:   {'Running' if self._discovery else 'Not running'}")
+        print("=" * 50)
+        print()
+        
+        self._terminal.print_startup_info(
+            local_address=self._bluetooth_manager.local_address if self._bluetooth_manager else None
+        )
+        
+        # Run terminal input loop
+        await self._terminal.start()
+    
+    async def stop(self):
+        """Stop the application."""
+        if not self._running:
+            return
+        
+        self._running = False
+        
+        print("\n[STOP] Stopping components...")
+        
+        # Stop terminal
+        if self._terminal:
+            await self._terminal.stop()
+        
+        # Stop discovery
+        if self._discovery:
+            await self._discovery.stop()
+        
+        # Stop Bluetooth manager
+        if self._bluetooth_manager:
+            await self._bluetooth_manager.stop()
+        
+        # Stop GATT server
+        if self._gatt_server:
+            await self._gatt_server.stop()
+        
+        # Stop connection pool
+        if self._connection_pool:
+            await self._connection_pool.stop()
+        
+        self._shutdown_event.set()
+        print("[OK] Application stopped")
+    
+    def request_shutdown(self):
+        """Request application shutdown (for signal handlers)."""
+        asyncio.create_task(self.stop())
+
+
+async def main():
+    """Main entry point."""
+    app = Application()
+    
+    # Set up signal handlers
+    loop = asyncio.get_event_loop()
+    
+    def signal_handler():
+        print("\n[SIGNAL] Shutdown requested...")
+        app.request_shutdown()
+    
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # Windows doesn't support add_signal_handler
+            pass
+    
+    try:
+        if not await app.initialize():
+            print("[ERROR] Failed to initialize application")
+            sys.exit(1)
+        
+        await app.start()
+        
+    except KeyboardInterrupt:
+        print("\n[INFO] Keyboard interrupt received")
+    except Exception as e:
+        print(f"[ERROR] Application error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        await app.stop()
+    
+    print("[EXIT] Goodbye!")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

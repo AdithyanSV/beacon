@@ -1,14 +1,14 @@
 # Bluetooth Mesh Broadcast Application
 
-A secure, optimized web-based application for Ubuntu 22.04 that enables mesh network broadcasting of messages between up to 5 devices using Bluetooth Low Energy (BLE).
+A terminal-based application for Ubuntu 22.04 that enables mesh network broadcasting of messages between up to 5 devices using Bluetooth Low Energy (BLE).
 
 ## Features
 
 - **Mesh Networking**: Messages automatically propagate through connected devices
-- **Real-time UI**: WebSocket-based interface with instant updates
-- **Security First**: Input sanitization, rate limiting, and origin validation
-- **Optimized Performance**: Async architecture, LRU caching, adaptive discovery
-- **Thread-Safe**: Proper locking mechanisms for concurrent operations
+- **Terminal Interface**: Simple, efficient CLI for interaction
+- **BLE GATT Server**: Hosts service for device discovery and message exchange
+- **Pure Asyncio**: Single event loop, no async/sync mixing
+- **Auto-Discovery**: Automatically finds and connects to other app devices
 
 ## Requirements
 
@@ -21,7 +21,6 @@ A secure, optimized web-based application for Ubuntu 22.04 that enables mesh net
 ### Software
 - Python 3.10 or higher
 - BlueZ 5.x
-- Modern web browser (Chrome, Firefox, Edge)
 
 ## Quick Start
 
@@ -35,12 +34,7 @@ A secure, optimized web-based application for Ubuntu 22.04 that enables mesh net
    ./start.sh
    ```
 
-3. **Open your browser**:
-   ```
-   http://localhost:5000
-   ```
-
-That's it! The startup script handles everything automatically.
+That's it! The application will start in your terminal.
 
 ## Installation
 
@@ -93,17 +87,6 @@ Simply run the startup script:
 ./start.sh
 ```
 
-The script will:
-- Check and create virtual environment if needed
-- Install dependencies automatically
-- Configure Bluetooth
-- Start the application
-
-**Note**: Make sure the script is executable:
-```bash
-chmod +x start.sh
-```
-
 ### Manual Start
 
 If you prefer to start manually:
@@ -111,43 +94,62 @@ If you prefer to start manually:
 ```bash
 source venv/bin/activate
 cd backend
-python main.py
+python main_cli.py
 ```
 
-### Accessing the UI
+## Commands
 
-Once the application is running, open your browser and navigate to:
-```
-http://localhost:5000
-```
+Once the application is running, you can use these commands:
+
+| Command | Description |
+|---------|-------------|
+| `send <message>` | Broadcast a message to the mesh |
+| `list` | Show connected and discovered devices |
+| `scan` | Force an immediate device scan |
+| `connect <address>` | Connect to a device by address |
+| `disconnect <address>` | Disconnect from a device |
+| `status` | Show system status |
+| `stats` | Show message statistics |
+| `clear` | Clear the screen |
+| `help` | Show help message |
+| `quit` | Exit the application |
+
+### Command Aliases
+
+- `send` / `s`
+- `list` / `ls` / `devices`
+- `scan` / `discover`
+- `connect` / `c`
+- `disconnect` / `dc`
+- `status` / `st`
+- `quit` / `exit` / `q`
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    Application Layer                      │
-│  ┌───────────────────────────────────────────────────┐  │
-│  │         Web UI (HTML/CSS/JavaScript)              │  │
-│  └───────────────┬───────────────────────────────────┘  │
-│                  │ WebSocket (with origin validation)    │
-│  ┌───────────────▼───────────────────────────────────┐  │
-│  │      Flask-SocketIO Server (Rate Limited)          │  │
-│  └───────────────┬───────────────────────────────────┘  │
-│                  │                                       │
-│  ┌───────────────▼───────────────────────────────────┐  │
-│  │    Message Handler (Validated & Sanitized)        │  │
-│  └───────────────┬───────────────────────────────────┘  │
-│                  │                                       │
-│  ┌───────────────▼───────────────────────────────────┐  │
-│  │    Mesh Router (Thread-Safe, LRU Cache)           │  │
-│  └───────────────┬───────────────────────────────────┘  │
-│                  │                                       │
-│  ┌───────────────▼───────────────────────────────────┐  │
-│  │    Bluetooth Manager (Bleak, Async)               │  │
-│  └───────────────┬───────────────────────────────────┘  │
-└──────────────────┼───────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│        Terminal Interface (CLI)         │
+│   stdin -> CommandParser -> actions     │
+│   stdout <- status, messages, logs      │
+└──────────────────┬──────────────────────┘
                    │
-         Bluetooth Hardware
+┌──────────────────▼──────────────────────┐
+│           Application Core              │
+│   - Initialize components               │
+│   - Wire up callbacks                   │
+│   - Coordinate message flow             │
+└──────────────────┬──────────────────────┘
+                   │
+     ┌─────────────┼─────────────┐
+     │             │             │
+┌────▼────┐  ┌─────▼─────┐  ┌────▼────┐
+│ Message │  │ Bluetooth │  │  GATT   │
+│ Handler │  │  Manager  │  │ Server  │
+└─────────┘  └───────────┘  └─────────┘
+                   │
+         ┌────────▼────────┐
+         │  BLE Hardware   │
+         └─────────────────┘
 ```
 
 ## Project Structure
@@ -155,42 +157,33 @@ http://localhost:5000
 ```
 bluetooth-mesh-broadcast/
 ├── backend/
-│   ├── main.py                 # Application entry point
-│   ├── config.py               # Configuration settings
+│   ├── main_cli.py              # Application entry point
+│   ├── config.py                # Configuration settings
+│   ├── cli/
+│   │   ├── terminal.py          # Terminal UI
+│   │   └── commands.py          # Command parser
 │   ├── bluetooth/
-│   │   ├── manager.py          # Async Bluetooth Manager (Bleak)
-│   │   ├── discovery.py        # Smart discovery with adaptive intervals
-│   │   ├── connection_pool.py  # Connection pool management
-│   │   └── constants.py        # UUIDs, constants
+│   │   ├── manager.py           # BLE connection manager
+│   │   ├── discovery.py         # Device discovery
+│   │   ├── gatt_server.py       # GATT server (bless)
+│   │   ├── connection_pool.py   # Connection management
+│   │   └── constants.py         # UUIDs, constants
 │   ├── messaging/
-│   │   ├── handler.py          # Message Handler with validation
-│   │   ├── protocol.py         # Message structure & validation
-│   │   ├── router.py           # Mesh routing (thread-safe)
-│   │   └── sanitizer.py        # Input sanitization
-│   ├── web/
-│   │   ├── server.py           # Flask + SocketIO setup
-│   │   ├── handlers.py         # WebSocket handlers (rate limited)
-│   │   └── security.py         # Origin validation, rate limiting
+│   │   ├── handler.py           # Message handling
+│   │   ├── protocol.py          # Message structure
+│   │   ├── router.py            # Mesh routing
+│   │   └── sanitizer.py         # Input sanitization
 │   ├── utils/
-│   │   ├── logger.py           # Structured logging
-│   │   ├── resource_monitor.py # Memory/connection monitoring
-│   │   └── helpers.py          # Utility functions
+│   │   └── logger.py            # Logging utilities
 │   └── exceptions/
-│       ├── bluetooth_errors.py # Bluetooth-specific exceptions
-│       └── message_errors.py   # Message handling exceptions
-├── frontend/
-│   ├── index.html              # Main HTML page
-│   ├── css/
-│   │   └── style.css           # Styling
-│   └── js/
-│       ├── app.js              # Main application logic
-│       ├── socket-handler.js   # Socket.IO client
-│       ├── ui-controller.js    # UI updates
-│       └── input-validator.js  # Client-side validation
+│       ├── bluetooth_errors.py  # Bluetooth exceptions
+│       └── message_errors.py    # Message exceptions
 ├── tests/
-│   └── ...                     # Test files
-├── requirements.txt            # Python dependencies
-└── README.md                   # This file
+│   └── ...                      # Test files
+├── requirements.txt             # Python dependencies
+├── start.sh                     # Startup script
+├── setup_bluetooth.sh           # Bluetooth setup
+└── README.md                    # This file
 ```
 
 ## Configuration
@@ -207,34 +200,21 @@ Configuration can be modified via environment variables or directly in `backend/
 | `MAX_CONCURRENT_CONNECTIONS` | 4 | Maximum peer connections |
 | `RATE_LIMIT_PER_CONNECTION` | 10/min | Messages per connection per minute |
 
-## Security Features
+### Environment Variables
 
-1. **Input Sanitization**: All user inputs are sanitized to prevent XSS and injection attacks
-2. **Rate Limiting**: Prevents message spam at connection, device, and global levels
-3. **Origin Validation**: WebSocket connections validated against allowed origins
-4. **Thread Safety**: Proper locking for all shared resources
-5. **Resource Monitoring**: Automatic alerts for memory and connection limits
+```bash
+# Bluetooth
+export CONNECTION_TIMEOUT=30
+export MAX_CONCURRENT_CONNECTIONS=4
 
-## API Reference
+# Messages
+export MAX_MESSAGE_SIZE=500
+export MESSAGE_TTL=3
 
-### WebSocket Events
-
-#### Client → Server
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `send_message` | `{ content: string }` | Broadcast a message |
-| `request_devices` | `{}` | Get connected devices |
-| `request_messages` | `{}` | Get recent messages |
-
-#### Server → Client
-
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `message_received` | Message object | New message received |
-| `message_sent` | `{ message_id, success }` | Send confirmation |
-| `devices_updated` | `{ devices, count }` | Device list updated |
-| `error` | `{ message, code }` | Error notification |
+# Logging
+export LOG_LEVEL=INFO
+export SHOW_DEBUG=false
+```
 
 ## Troubleshooting
 
@@ -267,6 +247,12 @@ newgrp bluetooth
 2. Check that both devices are running the application
 3. Verify Bluetooth is discoverable: `bluetoothctl discoverable on`
 
+### Device discovery issues
+
+1. Check that GATT server is running (shown in `status` command)
+2. Ensure both devices have the same service UUID
+3. Try forcing a scan with the `scan` command
+
 ## Known Limitations
 
 1. Maximum 5 devices due to Bluetooth connection limits
@@ -277,6 +263,3 @@ newgrp bluetooth
 ## License
 
 MIT License - See LICENSE file for details.
-# beacon
-# beacon
-# beacon
