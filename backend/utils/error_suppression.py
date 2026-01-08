@@ -94,10 +94,10 @@ class GlobalStderrFilter:
             traceback_text = "".join(self._current_traceback).lower()
             
             # Check if it contains filtered patterns or filtered file patterns
-            is_filtered_error = (
-                any(pattern.lower() in traceback_text for pattern in self.FILTERED_PATTERNS) or
-                any(pattern.lower() in traceback_text for pattern in self.FILTERED_FILE_PATTERNS)
-            )
+            # Be more specific - only filter if BOTH the error pattern AND file pattern match
+            has_error_pattern = any(pattern.lower() in traceback_text for pattern in self.FILTERED_PATTERNS)
+            has_file_pattern = any(pattern.lower() in traceback_text for pattern in self.FILTERED_FILE_PATTERNS)
+            is_filtered_error = has_error_pattern and has_file_pattern
             
             # If traceback is complete (ends with the error line) or is long enough
             if len(self._current_traceback) > 8 or (not text.strip() and len(self._current_traceback) > 3):
@@ -112,9 +112,12 @@ class GlobalStderrFilter:
                     self._current_traceback = []
                     return
         
-        # If this line should be filtered directly
+        # If this line should be filtered directly (only if it's a known error message)
         if should_filter_line:
-            return  # Don't write filtered lines
+            # Only filter if it's clearly a Device error, not just any mention of "Device"
+            if "'Device'" in text or '"Device"' in text:
+                return  # Don't write filtered lines
+            # Otherwise, let it through - might be a legitimate error
         
         # Write non-filtered content
         self._original_stderr.write(text)

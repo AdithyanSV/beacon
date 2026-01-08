@@ -694,8 +694,10 @@ class Application:
             local_address=self._bluetooth_manager.local_address if self._bluetooth_manager else None
         )
         
-        # Print some blank lines for dashboard space
-        print("\n" * 10)
+        # Print separator before dashboard starts
+        print("\n" + "=" * 50)
+        print("Live dashboard will appear below. Logs will be preserved above.")
+        print("=" * 50 + "\n")
         
         # Run terminal input loop (includes live dashboard)
         await self._terminal.start()

@@ -250,7 +250,8 @@ class TerminalUI:
         else:
             sender_display = f"{Colors.BRIGHT_CYAN}{sender}{Colors.RESET}"
         
-        print(f"\r{Colors.DIM}[{time_str}]{Colors.RESET} {sender_display}: {content}")
+        # Use newline instead of \r to preserve messages above dashboard
+        print(f"{Colors.DIM}[{time_str}]{Colors.RESET} {sender_display}: {content}")
         print(self._input_prompt, end="", flush=True)
     
     def print_device_found(self, address: str, name: str = None, rssi: int = None, is_app: bool = False):
@@ -265,19 +266,22 @@ class TerminalUI:
             icon = f"{Colors.BLUE}○{Colors.RESET}"
             label = "Device"
         
-        print(f"\r{icon} {label}: {Colors.CYAN}{address}{Colors.RESET} | {name_str}{rssi_str}")
+        # Use newline instead of \r to preserve notifications above dashboard
+        print(f"{icon} {label}: {Colors.CYAN}{address}{Colors.RESET} | {name_str}{rssi_str}")
         print(self._input_prompt, end="", flush=True)
     
     def print_device_connected(self, address: str, name: str = None):
         """Print device connection notification."""
         name_str = f" ({name})" if name else ""
-        print(f"\r{Colors.GREEN}✓ Connected:{Colors.RESET} {Colors.CYAN}{address}{Colors.RESET}{name_str}")
+        # Use newline instead of \r to preserve notifications above dashboard
+        print(f"{Colors.GREEN}✓ Connected:{Colors.RESET} {Colors.CYAN}{address}{Colors.RESET}{name_str}")
         print(self._input_prompt, end="", flush=True)
     
     def print_device_disconnected(self, address: str, name: str = None):
         """Print device disconnection notification."""
         name_str = f" ({name})" if name else ""
-        print(f"\r{Colors.RED}✗ Disconnected:{Colors.RESET} {Colors.CYAN}{address}{Colors.RESET}{name_str}")
+        # Use newline instead of \r to preserve notifications above dashboard
+        print(f"{Colors.RED}✗ Disconnected:{Colors.RESET} {Colors.CYAN}{address}{Colors.RESET}{name_str}")
         print(self._input_prompt, end="", flush=True)
     
     def print_devices_list(self, connected: list, discovered: list):
@@ -367,27 +371,33 @@ class TerminalUI:
     
     def print_info(self, message: str):
         """Print an info message."""
-        print(f"\r{Colors.GREEN}[INFO]{Colors.RESET} {message}")
+        # Use newline instead of \r to preserve logs above dashboard
+        print(f"{Colors.GREEN}[INFO]{Colors.RESET} {message}")
         print(self._input_prompt, end="", flush=True)
     
     def print_warning(self, message: str):
         """Print a warning message."""
-        print(f"\r{Colors.YELLOW}[WARN]{Colors.RESET} {message}")
+        # Use newline instead of \r to preserve logs above dashboard
+        print(f"{Colors.YELLOW}[WARN]{Colors.RESET} {message}")
         print(self._input_prompt, end="", flush=True)
     
     def print_error(self, message: str):
         """Print an error message."""
+        # Errors should always be visible, use newline
         print(f"{Colors.RED}[ERROR]{Colors.RESET} {message}")
+        print(self._input_prompt, end="", flush=True)
     
     def print_debug(self, message: str):
         """Print a debug message (only if debug enabled)."""
         if Config.terminal.SHOW_DEBUG:
-            print(f"\r{Colors.DIM}[DEBUG] {message}{Colors.RESET}")
+            # Use newline instead of \r to preserve logs above dashboard
+            print(f"{Colors.DIM}[DEBUG] {message}{Colors.RESET}")
             print(self._input_prompt, end="", flush=True)
     
     def print_success(self, message: str):
         """Print a success message."""
-        print(f"\r{Colors.GREEN}[OK]{Colors.RESET} {message}")
+        # Use newline instead of \r to preserve logs above dashboard
+        print(f"{Colors.GREEN}[OK]{Colors.RESET} {message}")
         print(self._input_prompt, end="", flush=True)
     
     def clear_screen(self):
@@ -485,25 +495,26 @@ class TerminalUI:
             dashboard_start_line = 7
             sys.stdout.write(f"\033[{dashboard_start_line};1H")
             
-            # Clear from current position to end of screen
-            # This ensures we remove any previous dashboard content
-            sys.stdout.write("\033[J")
+            # Clear ONLY the dashboard area, not the entire screen
+            # Clear each line individually to avoid wiping logs below
+            for i in range(len(lines)):
+                sys.stdout.write("\033[K")  # Clear current line
+                if i < len(lines) - 1:
+                    sys.stdout.write("\n")  # Move to next line
+            
+            # Move back to start of dashboard
+            sys.stdout.write(f"\033[{dashboard_start_line};1H")
             
             # Print dashboard lines
             for line in lines:
                 sys.stdout.write(line + "\n")
             
-            # Clear any remaining lines below dashboard to prevent artifacts
-            # Calculate how many lines we need to clear (dashboard is typically ~20 lines)
-            remaining_lines = max(0, 25 - len(lines))  # Clear up to 25 lines total
-            if remaining_lines > 0:
-                for _ in range(remaining_lines):
+            # Clear any remaining old dashboard lines (if dashboard got smaller)
+            # Only clear a few extra lines to be safe, not the entire screen
+            max_expected_lines = 25
+            if len(lines) < max_expected_lines:
+                for _ in range(max_expected_lines - len(lines)):
                     sys.stdout.write("\033[K\n")  # Clear line and move down
-            
-            # Ensure we're at the right position for input prompt
-            # Move to a fixed position below dashboard
-            input_line = dashboard_start_line + len(lines) + 2
-            sys.stdout.write(f"\033[{input_line};1H")
             
             # Restore cursor position (will be at input prompt)
             sys.stdout.write("\033[u")
