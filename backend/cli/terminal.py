@@ -236,7 +236,9 @@ class TerminalUI:
                 return await result
             return result
         except Exception as e:
-            self.print_error(f"Callback error: {e}")
+            # Only print error if it's not a dashboard callback to avoid spam
+            if callback != self._on_get_live_stats:
+                self.print_error(f"Callback error: {e}")
             return None
     
     # ==================== Output Methods ====================
@@ -452,6 +454,8 @@ class TerminalUI:
         
         # Track if dashboard has been displayed to avoid duplicate headers
         dashboard_initialized = False
+        error_count = 0
+        max_errors = 5  # Log error after 5 consecutive failures
         
         while self._running:
             try:
@@ -460,15 +464,31 @@ class TerminalUI:
                     if stats:
                         self._update_dashboard(stats, first_time=not dashboard_initialized)
                         dashboard_initialized = True
+                        error_count = 0  # Reset error count on success
+                    else:
+                        error_count += 1
+                        if error_count >= max_errors:
+                            print(f"\n[WARN] Dashboard: Stats handler returned None {error_count} times")
+                            error_count = 0  # Reset to avoid spam
+                else:
+                    error_count += 1
+                    if error_count >= max_errors:
+                        print(f"\n[WARN] Dashboard: Stats handler not set")
+                        error_count = 0
                 
                 await asyncio.sleep(2)  # Update every 2 seconds
                 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                # Log error but continue
-                if Config.terminal.SHOW_DEBUG:
-                    print(f"\r[DEBUG] Dashboard error: {e}", end="")
+                error_count += 1
+                # Log error after multiple failures to avoid spam
+                if error_count >= max_errors:
+                    print(f"\n[ERROR] Dashboard update failed: {e}")
+                    import traceback
+                    if Config.terminal.SHOW_DEBUG:
+                        traceback.print_exc()
+                    error_count = 0  # Reset to avoid spam
                 await asyncio.sleep(2)
     
     def _update_dashboard(self, stats: dict, first_time: bool = False):

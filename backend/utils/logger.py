@@ -150,16 +150,22 @@ def setup_logging() -> None:
     class BleakErrorFilter(logging.Filter):
         """Filter to suppress known non-fatal bleak errors."""
         def filter(self, record):
+            message = record.getMessage()
             # Suppress KeyError: 'Device' messages from bleak/dbus-fast
-            if 'Device' in record.getMessage() and 'KeyError' in record.getMessage():
+            # Check for various forms of the error message
+            if ('Device' in message and 'KeyError' in message) or \
+               ("A message handler raised an exception: 'Device'" in message) or \
+               ("KeyError: 'Device'" in message):
                 return False
             return True
     
-    # Apply filter to relevant loggers
+    # Apply filter to relevant loggers - including message_bus sublogger
     error_filter = BleakErrorFilter()
     logging.getLogger('bleak').addFilter(error_filter)
     logging.getLogger('dbus_fast').addFilter(error_filter)
     logging.getLogger('dbus-fast').addFilter(error_filter)
+    logging.getLogger('dbus_fast.message_bus').addFilter(error_filter)  # Specific sublogger
+    logging.getLogger('dbus-fast.message_bus').addFilter(error_filter)  # Alternative name
 
 
 def get_logger(name: str, context: Dict[str, Any] = None) -> ContextLogger:
