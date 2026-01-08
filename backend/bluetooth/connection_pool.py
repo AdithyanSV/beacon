@@ -9,7 +9,6 @@ from typing import Dict, List, Optional, Callable, Any, Tuple
 from dataclasses import dataclass, field
 from enum import Enum, auto
 import time
-import heapq
 
 from config import Config
 from exceptions import BluetoothConnectionError
@@ -104,7 +103,7 @@ class ConnectionPool:
         
         # Blacklist (temporarily blocked devices)
         self._blacklist: Dict[str, float] = {}  # address -> unblock_time
-        self._blacklist_duration = 60.0  # seconds
+        self._blacklist_duration = float(Config.bluetooth.CONNECTION_BLACKLIST_DURATION)  # seconds
         
         # Callbacks
         self._on_connection_added: Optional[Callable[[ConnectionEntry], Any]] = None

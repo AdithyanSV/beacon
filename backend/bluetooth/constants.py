@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from typing import Optional
 import time
 
+# Import config to use consistent UUIDs
+try:
+    from config import Config
+except ImportError:
+    # Fallback if config not available
+    Config = None
+
 
 class ConnectionState(Enum):
     """Bluetooth connection states."""
@@ -74,12 +81,28 @@ class DeviceInfo:
         }
 
 
+class _UUIDDescriptor:
+    """Descriptor for lazy UUID access from Config."""
+    def __init__(self, config_attr, fallback):
+        self.config_attr = config_attr
+        self.fallback = fallback
+        self._value = None
+    
+    def __get__(self, obj, objtype=None):
+        if self._value is None:
+            if Config:
+                self._value = getattr(Config.bluetooth, self.config_attr)
+            else:
+                self._value = self.fallback
+        return self._value
+
+
 class BluetoothConstants:
     """Bluetooth protocol constants."""
     
-    # Service UUIDs (from config, but also defined here for reference)
-    SERVICE_UUID = "12345678-1234-5678-1234-56789abcdef0"
-    CHARACTERISTIC_UUID = "12345678-1234-5678-1234-56789abcdef1"
+    # Service UUIDs - automatically use Config values for consistency
+    SERVICE_UUID = _UUIDDescriptor('SERVICE_UUID', "12345678-1234-5678-1234-56789abcdef0")
+    CHARACTERISTIC_UUID = _UUIDDescriptor('CHARACTERISTIC_UUID', "12345678-1234-5678-1234-56789abcdef1")
     
     # Protocol constants
     PROTOCOL_VERSION = 1

@@ -79,6 +79,12 @@ class TerminalUI:
         self._on_status: Optional[Callable[[], Any]] = None
         self._on_stats: Optional[Callable[[], Any]] = None
         self._on_quit: Optional[Callable[[], Any]] = None
+        self._on_get_live_stats: Optional[Callable[[], Any]] = None  # For live dashboard
+        
+        # Live dashboard
+        self._dashboard_enabled = True
+        self._dashboard_task: Optional[asyncio.Task] = None
+        self._dashboard_lines = 0
         
         # Check if colors are supported
         if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -107,8 +113,12 @@ class TerminalUI:
         print()
     
     async def start(self):
-        """Start the terminal input loop."""
+        """Start the terminal input loop and live dashboard."""
         self._running = True
+        
+        # Start live dashboard if enabled
+        if self._dashboard_enabled and self._on_get_live_stats:
+            self._dashboard_task = asyncio.create_task(self._dashboard_loop())
         
         while self._running:
             try:
@@ -137,6 +147,14 @@ class TerminalUI:
     async def stop(self):
         """Stop the terminal UI."""
         self._running = False
+        
+        # Stop dashboard
+        if self._dashboard_task:
+            self._dashboard_task.cancel()
+            try:
+                await self._dashboard_task
+            except asyncio.CancelledError:
+                pass
     
     async def _handle_input(self, line: str):
         """Handle a line of user input."""
@@ -409,3 +427,162 @@ class TerminalUI:
     def set_quit_handler(self, handler: Callable[[], Any]):
         """Set handler for quit command."""
         self._on_quit = handler
+    
+    def set_live_stats_handler(self, handler: Callable[[], Any]):
+        """Set handler for getting live stats for dashboard."""
+        self._on_get_live_stats = handler
+    
+    # ==================== Live Dashboard ====================
+    
+    async def _dashboard_loop(self):
+        """Background task to update live dashboard."""
+        # Initial clear and dashboard display
+        await asyncio.sleep(1)  # Wait a bit for app to initialize
+        
+        while self._running:
+            try:
+                if self._on_get_live_stats:
+                    stats = await self._safe_callback(self._on_get_live_stats)
+                    if stats:
+                        self._update_dashboard(stats)
+                
+                await asyncio.sleep(2)  # Update every 2 seconds
+                
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                # Silently continue on errors
+                await asyncio.sleep(2)
+    
+    def _update_dashboard(self, stats: dict):
+        """Update the live dashboard display."""
+        if not sys.stdout.isatty():
+            return  # Can't update if not a TTY
+        
+        try:
+            # Save cursor position
+            sys.stdout.write("\033[s")
+            
+            # Move to top (after banner area, line 6)
+            sys.stdout.write("\033[6;1H")
+            
+            # Clear from here to end of screen
+            sys.stdout.write("\033[J")
+            
+            # Build dashboard content
+            lines = self._build_dashboard(stats)
+            self._dashboard_lines = len(lines)
+            
+            # Print dashboard
+            for line in lines:
+                sys.stdout.write(line + "\n")
+            
+            # Restore cursor position (will be at input prompt)
+            sys.stdout.write("\033[u")
+            sys.stdout.flush()
+            
+        except Exception:
+            # If ANSI codes fail, just print normally
+            pass
+    
+    def _build_dashboard(self, stats: dict) -> List[str]:
+        """Build dashboard content lines."""
+        lines = []
+        
+        # Header
+        lines.append(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}╔══════════════════════════════════════════════════════════╗{Colors.RESET}")
+        lines.append(f"{Colors.BOLD}{Colors.BRIGHT_CYAN}║{Colors.RESET} {Colors.BOLD}LIVE DEVICE SCANNER & STATS{Colors.RESET}                    {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        lines.append(f"{Colors.BRIGHT_CYAN}╠══════════════════════════════════════════════════════════╣{Colors.RESET}")
+        
+        # Local Device Info (this device running the app)
+        local_device = stats.get("local_device", {})
+        local_name = local_device.get("name", "This Device")
+        local_address = local_device.get("address", "N/A")
+        local_status = local_device.get("status", "Unknown")
+        status_color = Colors.GREEN if local_status == "Running" else Colors.RED
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} {Colors.BOLD}Local Device (This App):{Colors.RESET}                              {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   {Colors.BRIGHT_GREEN}●{Colors.RESET} {local_name:<20} {local_address:<17} Status: {status_color}{local_status:<8}{Colors.RESET} {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        lines.append(f"{Colors.BRIGHT_CYAN}╟──────────────────────────────────────────────────────────╢{Colors.RESET}")
+        
+        # Connected Devices (at the top)
+        connected_devices = stats.get("discovery", {}).get("connected_devices_list", [])
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} {Colors.BOLD}Connected Devices ({len(connected_devices)}/{Config.bluetooth.MAX_CONCURRENT_CONNECTIONS}):{Colors.RESET}             {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        if connected_devices:
+            for i, dev in enumerate(connected_devices[:5]):  # Show up to 5
+                addr = dev.get("address", "N/A")
+                name = dev.get("name", "Unknown")
+                rssi = dev.get("rssi", "N/A")
+                health = dev.get("health_score", "N/A")
+                rssi_str = f"{rssi}" if rssi != "N/A" and rssi is not None else "N/A"
+                health_str = f"{health:.2f}" if health != "N/A" and health is not None else "N/A"
+                line = f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   {Colors.GREEN}●{Colors.RESET} {name[:15]:<15} {addr[-5:]:<5} RSSI:{rssi_str:<4} Health:{health_str:<5} {Colors.BRIGHT_CYAN}║{Colors.RESET}"
+                lines.append(line)
+            if len(connected_devices) > 5:
+                lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   ... and {len(connected_devices) - 5} more                                     {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        else:
+            lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   {Colors.DIM}No devices connected{Colors.RESET}                                {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        lines.append(f"{Colors.BRIGHT_CYAN}╟──────────────────────────────────────────────────────────╢{Colors.RESET}")
+        
+        # Discovered App Devices (at the top)
+        discovered_app_devices = stats.get("discovery", {}).get("discovered_app_devices_list", [])
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} {Colors.BOLD}Discovered App Devices ({len(discovered_app_devices)}):{Colors.RESET}           {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        if discovered_app_devices:
+            for i, dev in enumerate(discovered_app_devices[:5]):  # Show up to 5
+                addr = dev.get("address", "N/A")
+                name = dev.get("name", "Unknown")
+                rssi = dev.get("rssi", "N/A")
+                state = dev.get("state", "N/A")
+                rssi_str = f"{rssi}" if rssi != "N/A" and rssi is not None else "N/A"
+                state_color = Colors.GREEN if state == "CONNECTED" else Colors.YELLOW if state == "CONNECTING" else Colors.RED
+                line = f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   {Colors.YELLOW}★{Colors.RESET} {name[:15]:<15} {addr[-5:]:<5} RSSI:{rssi_str:<4} State:{state_color}{state:<10}{Colors.RESET} {Colors.BRIGHT_CYAN}║{Colors.RESET}"
+                lines.append(line)
+            if len(discovered_app_devices) > 5:
+                lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   ... and {len(discovered_app_devices) - 5} more                                     {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        else:
+            lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET}   {Colors.DIM}No app devices discovered{Colors.RESET}                           {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        lines.append(f"{Colors.BRIGHT_CYAN}╠══════════════════════════════════════════════════════════╣{Colors.RESET}")
+        
+        # Bluetooth Status
+        bt = stats.get("bluetooth", {})
+        bt_status = f"{Colors.GREEN}● Running{Colors.RESET}" if bt.get("running") else f"{Colors.RED}● Stopped{Colors.RESET}"
+        connected = bt.get("connected", 0)
+        max_conn = bt.get("max", 0)
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} Bluetooth: {bt_status} | Connected: {Colors.CYAN}{connected}/{max_conn}{Colors.RESET}                    {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # GATT Server
+        gatt = stats.get("gatt_server", {})
+        gatt_status = f"{Colors.GREEN}● Running{Colors.RESET}" if gatt.get("running") else f"{Colors.RED}● Stopped{Colors.RESET}"
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} GATT Server: {gatt_status}                                    {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # Discovery Status
+        disc = stats.get("discovery", {})
+        disc_state = disc.get("state", "UNKNOWN")
+        disc_color = Colors.GREEN if disc_state == "SCANNING" else Colors.YELLOW
+        interval = disc.get("current_interval", 0.0)
+        net_state = disc.get("network_state", "UNKNOWN")
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} Discovery: {disc_color}{disc_state:12}{Colors.RESET} | Interval: {Colors.CYAN}{interval:.1f}s{Colors.RESET} | Network: {Colors.CYAN}{net_state}{Colors.RESET}  {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # Device Counts
+        total_devices = disc.get("total_devices", 0)
+        app_devices = disc.get("app_devices", 0)
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} Devices: Total: {Colors.CYAN}{total_devices:3}{Colors.RESET} | App Devices: {Colors.BRIGHT_GREEN}{app_devices:3}{Colors.RESET}                      {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # Discovery Stats
+        total_scans = disc.get("total_scans", 0)
+        successful_scans = disc.get("successful_scans", 0)
+        devices_found = disc.get("devices_found", 0)
+        empty_scans = disc.get("consecutive_empty_scans", 0)
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} Scans: Total: {Colors.CYAN}{total_scans:4}{Colors.RESET} | Success: {Colors.GREEN}{successful_scans:4}{Colors.RESET} | Found: {Colors.GREEN}{devices_found:4}{Colors.RESET} | Empty: {Colors.YELLOW}{empty_scans:2}{Colors.RESET}  {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # Message Stats
+        msg = stats.get("messages", {})
+        sent = msg.get("sent", 0)
+        received = msg.get("received", 0)
+        forwarded = msg.get("forwarded", 0)
+        lines.append(f"{Colors.BRIGHT_CYAN}║{Colors.RESET} Messages: Sent: {Colors.CYAN}{sent:4}{Colors.RESET} | Received: {Colors.GREEN}{received:4}{Colors.RESET} | Forwarded: {Colors.YELLOW}{forwarded:4}{Colors.RESET}  {Colors.BRIGHT_CYAN}║{Colors.RESET}")
+        
+        # Footer
+        lines.append(f"{Colors.BRIGHT_CYAN}╚══════════════════════════════════════════════════════════╝{Colors.RESET}")
+        lines.append("")  # Empty line before input
+        
+        return lines

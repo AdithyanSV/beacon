@@ -10,9 +10,13 @@ Fixed: Deduplication now happens in the callback to avoid duplicate processing.
 """
 
 import asyncio
+import warnings
+import logging
+import sys
 from typing import Dict, List, Optional, Callable, Any, Set
 from enum import Enum, auto
 from dataclasses import dataclass
+from io import StringIO
 import time
 
 from bleak import BleakScanner, BleakError
@@ -30,6 +34,54 @@ from bluetooth.constants import (
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Suppress known non-fatal errors from bleak/BlueZ D-Bus backend
+# This KeyError happens when BlueZ sends D-Bus messages without expected keys
+# It's a known issue and doesn't affect functionality
+_bleak_logger = logging.getLogger('bleak')
+_bleak_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
+
+# Also suppress dbus-fast internal errors
+_dbus_logger = logging.getLogger('dbus_fast')
+_dbus_logger.setLevel(logging.ERROR)
+_dbus_logger = logging.getLogger('dbus-fast')
+_dbus_logger.setLevel(logging.ERROR)
+
+
+class StderrFilter:
+    """Context manager to filter known non-fatal errors from stderr."""
+    
+    def __init__(self):
+        self.original_stderr = sys.stderr
+        self.buffer = StringIO()
+        self.filtered_patterns = [
+            "KeyError: 'Device'",
+            "A message handler raised an exception: 'Device'",
+        ]
+    
+    def __enter__(self):
+        sys.stderr = self
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stderr = self.original_stderr
+        # Only print if it's not a filtered error
+        content = self.buffer.getvalue()
+        if content:
+            should_filter = any(pattern in content for pattern in self.filtered_patterns)
+            if not should_filter:
+                self.original_stderr.write(content)
+        return False
+    
+    def write(self, text):
+        """Write to buffer, filtering known errors."""
+        # Check if this is a known error we want to suppress
+        if not any(pattern in text for pattern in self.filtered_patterns):
+            self.buffer.write(text)
+    
+    def flush(self):
+        """Flush buffer."""
+        pass
 
 
 class NetworkState(Enum):
@@ -221,9 +273,26 @@ class DeviceDiscovery:
             logger.info(f"🔍 Starting BLE scan #{self._stats.total_scans} (timeout: {timeout}s)")
             
             scanner = BleakScanner(detection_callback=detection_callback)
-            await scanner.start()
-            await asyncio.sleep(timeout)
-            await scanner.stop()
+            
+            # Suppress known non-fatal dbus-fast KeyError during scan operations
+            with StderrFilter():
+                try:
+                    await asyncio.wait_for(
+                        scanner.start(),
+                        timeout=Config.bluetooth.SCANNER_START_TIMEOUT
+                    )
+                    await asyncio.sleep(timeout)
+                    await asyncio.wait_for(
+                        scanner.stop(),
+                        timeout=Config.bluetooth.SCANNER_STOP_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("Scanner operation timed out")
+                    try:
+                        await scanner.stop()
+                    except Exception:
+                        pass
+                    raise BluetoothDiscoveryError("Scanner operation timed out")
             
             # Log results
             unique_devices_seen = len(self._current_scan_devices)
@@ -352,7 +421,7 @@ class DeviceDiscovery:
     async def _check_lost_devices(self) -> None:
         """Check for devices that haven't been seen recently."""
         current_time = time.time()
-        lost_threshold = 60.0  # Consider device lost after 60 seconds
+        lost_threshold = float(Config.bluetooth.DEVICE_LOST_THRESHOLD)
         
         lost_devices = []
         

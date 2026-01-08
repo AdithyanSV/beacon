@@ -138,9 +138,28 @@ def setup_logging() -> None:
         root_logger.addHandler(file_handler)
     
     # Set level for third-party loggers to reduce noise
-    logging.getLogger('bleak').setLevel(logging.WARNING)
+    logging.getLogger('bleak').setLevel(logging.ERROR)  # Only show errors
     logging.getLogger('bless').setLevel(logging.WARNING)
     logging.getLogger('asyncio').setLevel(logging.WARNING)
+    logging.getLogger('dbus_fast').setLevel(logging.ERROR)  # Suppress D-Bus message handler errors
+    logging.getLogger('dbus-fast').setLevel(logging.ERROR)  # Alternative name
+    
+    # Suppress specific known non-fatal errors from bleak/BlueZ
+    # The KeyError: 'Device' is a known issue where BlueZ sends D-Bus messages
+    # without expected keys - it's non-fatal and doesn't affect functionality
+    class BleakErrorFilter(logging.Filter):
+        """Filter to suppress known non-fatal bleak errors."""
+        def filter(self, record):
+            # Suppress KeyError: 'Device' messages from bleak/dbus-fast
+            if 'Device' in record.getMessage() and 'KeyError' in record.getMessage():
+                return False
+            return True
+    
+    # Apply filter to relevant loggers
+    error_filter = BleakErrorFilter()
+    logging.getLogger('bleak').addFilter(error_filter)
+    logging.getLogger('dbus_fast').addFilter(error_filter)
+    logging.getLogger('dbus-fast').addFilter(error_filter)
 
 
 def get_logger(name: str, context: Dict[str, Any] = None) -> ContextLogger:

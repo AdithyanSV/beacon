@@ -5,7 +5,7 @@ Integrates sanitization, protocol, routing, and rate limiting.
 """
 
 import asyncio
-from typing import Optional, Callable, Any, List, Dict
+from typing import Optional, Callable, Any, List, Dict, Tuple
 from dataclasses import dataclass, field
 import time
 
@@ -18,6 +18,9 @@ from exceptions import (
 from messaging.sanitizer import MessageSanitizer
 from messaging.protocol import Message, MessageProtocol, MessageType
 from messaging.router import MeshRouter
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -46,7 +49,7 @@ class RateLimitTracker:
         self,
         connection_id: str = None,
         device_id: str = None
-    ) -> tuple[bool, Optional[str], Optional[float]]:
+    ) -> Tuple[bool, Optional[str], Optional[float]]:
         """
         Check rate limits and record if allowed.
         
@@ -275,7 +278,7 @@ class MessageHandler:
         data: bytes,
         source_device: str,
         connected_devices: List[str] = None
-    ) -> tuple[Optional[Message], List[str]]:
+    ) -> Tuple[Optional[Message], List[str]]:
         """
         Process a received message.
         
@@ -320,10 +323,12 @@ class MessageHandler:
             
         except MessageValidationError as e:
             self._stats.validation_errors += 1
+            logger.warning(f"Message validation error from {source_device}: {e}")
             if self._on_error:
                 await self._safe_callback(self._on_error, e)
             return None, []
         except Exception as e:
+            logger.error(f"Unexpected error processing message from {source_device}: {e}", exc_info=True)
             if self._on_error:
                 await self._safe_callback(self._on_error, e)
             return None, []

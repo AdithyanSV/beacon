@@ -29,20 +29,30 @@ from bluetooth.discovery import DeviceDiscovery
 from bluetooth.connection_pool import ConnectionPool
 from bluetooth.gatt_server import BLEGATTServer
 from messaging.handler import MessageHandler
-from web.async_server import (
-    create_app,
-    sio,
-    set_bluetooth_manager,
-    set_message_handler,
-    set_discovery,
-    set_gatt_server,
-    emit_message_received,
-    emit_devices_updated,
-)
+
+# Web server imports (optional - web module may not exist)
+try:
+    from web.async_server import (
+        create_app,
+        sio,
+        set_bluetooth_manager,
+        set_message_handler,
+        set_discovery,
+        set_gatt_server,
+        emit_message_received,
+        emit_devices_updated,
+    )
+    WEB_SERVER_AVAILABLE = True
+except ImportError:
+    WEB_SERVER_AVAILABLE = False
 
 # Set up logging
 setup_logging()
 logger = get_logger(__name__)
+
+# Log web server availability
+if not WEB_SERVER_AVAILABLE:
+    logger.warning("Web server module not available. Web UI will not be available.")
 
 
 class Application:
@@ -120,14 +130,18 @@ class Application:
             # Set up callbacks
             self._setup_callbacks()
             
-            # Set up web handlers
-            set_bluetooth_manager(self._bluetooth_manager)
-            set_message_handler(self._message_handler)
-            set_discovery(self._discovery)
-            set_gatt_server(self._gatt_server)
-            
-            # Create web app
-            self._app = create_app()
+            # Set up web handlers (if available)
+            if WEB_SERVER_AVAILABLE:
+                set_bluetooth_manager(self._bluetooth_manager)
+                set_message_handler(self._message_handler)
+                set_discovery(self._discovery)
+                set_gatt_server(self._gatt_server)
+                
+                # Create web app
+                self._app = create_app()
+            else:
+                self._app = None
+                logger.warning("Web server not available - running in CLI mode only")
             
             logger.info("Application initialized successfully")
             return True
@@ -186,6 +200,11 @@ class Application:
             device_info
         )
         
+        # Update resource monitor connection count
+        if self._resource_monitor:
+            count = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+            self._resource_monitor.update_connection_count(count)
+        
         # Update UI
         await self._emit_device_update()
     
@@ -195,6 +214,11 @@ class Application:
         
         # Remove from connection pool
         await self._connection_pool.remove_connection(device_info.address)
+        
+        # Update resource monitor connection count
+        if self._resource_monitor:
+            count = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+            self._resource_monitor.update_connection_count(count)
         
         # Update UI
         await self._emit_device_update()
@@ -210,6 +234,10 @@ class Application:
             else:
                 message_bytes = str(data).encode('utf-8')
             
+            # Record message received in connection pool
+            if self._connection_pool:
+                await self._connection_pool.record_message_received(address, len(message_bytes))
+            
             connected = await self._bluetooth_manager.get_connected_devices()
             connected_addresses = [d.address for d in connected]
             
@@ -223,7 +251,9 @@ class Application:
                 forward_data = await self._message_handler.prepare_for_forwarding(message)
                 if forward_data:
                     for target in forward_to:
-                        await self._bluetooth_manager.send_data(target, forward_data)
+                        success = await self._bluetooth_manager.send_data(target, forward_data)
+                        if success and self._connection_pool:
+                            await self._connection_pool.record_message_sent(target, len(forward_data))
             
         except Exception as e:
             logger.error(f"Error processing Bluetooth message: {e}")
@@ -288,7 +318,8 @@ class Application:
     
     async def _on_message_received(self, message):
         """Handle received message (for UI)."""
-        await emit_message_received(message.to_dict(), is_own=False)
+        if WEB_SERVER_AVAILABLE:
+            await emit_message_received(message.to_dict(), is_own=False)
         self._resource_monitor.record_message()
     
     async def _on_resource_warning(self, message: str, snapshot):
@@ -301,7 +332,7 @@ class Application:
     
     async def _emit_device_update(self):
         """Emit device list update to web clients."""
-        if self._bluetooth_manager:
+        if WEB_SERVER_AVAILABLE and self._bluetooth_manager:
             devices = await self._bluetooth_manager.get_connected_devices()
             device_list = [d.to_dict() for d in devices]
             await emit_devices_updated(device_list, len(device_list))
@@ -349,26 +380,39 @@ class Application:
             except Exception as e:
                 logger.warning(f"Failed to start connection pool: {e}")
         
-        # Start web server
-        try:
-            self._runner = web.AppRunner(self._app)
-            await self._runner.setup()
-            
-            self._site = web.TCPSite(
-                self._runner,
-                Config.web.HOST,
-                Config.web.PORT
-            )
-            await self._site.start()
-            
-            logger.info(f"✓ Web server started at http://{Config.web.HOST}:{Config.web.PORT}")
-        except Exception as e:
-            logger.error(f"Failed to start web server: {e}")
-            raise
+        # Start web server (if available)
+        if WEB_SERVER_AVAILABLE and self._app:
+            try:
+                web_host = getattr(Config, 'web', None)
+                host = web_host.HOST if web_host and hasattr(web_host, 'HOST') else 'localhost'
+                port = web_host.PORT if web_host and hasattr(web_host, 'PORT') else 8080
+                
+                self._runner = web.AppRunner(self._app)
+                await self._runner.setup()
+                
+                self._site = web.TCPSite(
+                    self._runner,
+                    host,
+                    port
+                )
+                await self._site.start()
+                
+                logger.info(f"✓ Web server started at http://{host}:{port}")
+            except Exception as e:
+                logger.error(f"Failed to start web server: {e}")
+                logger.warning("Continuing without web server...")
+        else:
+            logger.info("Web server not available - running in CLI mode")
         
         logger.info("=" * 50)
         logger.info("APPLICATION RUNNING")
-        logger.info(f"  Web UI: http://{Config.web.HOST}:{Config.web.PORT}")
+        if WEB_SERVER_AVAILABLE and self._app:
+            web_host = getattr(Config, 'web', None)
+            host = web_host.HOST if web_host and hasattr(web_host, 'HOST') else 'localhost'
+            port = web_host.PORT if web_host and hasattr(web_host, 'PORT') else 8080
+            logger.info(f"  Web UI: http://{host}:{port}")
+        else:
+            logger.info("  Web UI: Not available")
         logger.info(f"  GATT Server: {'Running' if self._gatt_server and self._gatt_server.is_running else 'Not running'}")
         logger.info(f"  BLE Discovery: {'Running' if self._discovery else 'Not running'}")
         logger.info("=" * 50)

@@ -60,6 +60,14 @@ class BluetoothConfig:
     # Heartbeat
     HEARTBEAT_INTERVAL = get_int_env("HEARTBEAT_INTERVAL", 15)  # seconds
     HEARTBEAT_TIMEOUT = get_int_env("HEARTBEAT_TIMEOUT", 45)  # seconds
+    
+    # Device tracking
+    DEVICE_LOST_THRESHOLD = get_int_env("DEVICE_LOST_THRESHOLD", 60)  # seconds
+    CONNECTION_BLACKLIST_DURATION = get_int_env("CONNECTION_BLACKLIST_DURATION", 60)  # seconds
+    
+    # Scanner timeouts
+    SCANNER_START_TIMEOUT = get_int_env("SCANNER_START_TIMEOUT", 5)  # seconds
+    SCANNER_STOP_TIMEOUT = get_int_env("SCANNER_STOP_TIMEOUT", 5)  # seconds
 
 
 class MessageConfig:

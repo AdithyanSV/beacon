@@ -12,6 +12,7 @@ Integrated with ConnectionPool for unified connection state management.
 
 import asyncio
 import json
+import logging
 from typing import Dict, Optional, Callable, Any, List
 from dataclasses import dataclass
 import time
@@ -33,10 +34,20 @@ from bluetooth.constants import (
     ConnectionState,
     DeviceInfo,
     BluetoothConstants,
-    MessageType,
 )
+from messaging.protocol import MessageType
 
 logger = get_logger(__name__)
+
+# Suppress known non-fatal errors from bleak/BlueZ D-Bus backend
+# This KeyError happens when BlueZ sends D-Bus messages without expected keys
+# It's a known issue and doesn't affect functionality
+_bleak_logger = logging.getLogger('bleak')
+_bleak_logger.setLevel(logging.ERROR)  # Only show errors, not warnings
+
+# Also suppress dbus-fast internal errors
+_dbus_logger = logging.getLogger('dbus_fast')
+_dbus_logger.setLevel(logging.ERROR)
 
 
 @dataclass

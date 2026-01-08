@@ -221,8 +221,13 @@ class BLEGATTServer:
             return False
         
         try:
+            # Get the characteristic
+            characteristic = self._server.get_characteristic(self._config.characteristic_uuid)
+            if not characteristic:
+                logger.warning(f"Characteristic {self._config.characteristic_uuid} not found")
+                return False
+            
             # Update the characteristic value
-            self._server.get_characteristic(self._config.characteristic_uuid)
             self._server.update_value(
                 self._config.service_uuid,
                 self._config.characteristic_uuid

@@ -126,6 +126,7 @@ class Application:
         self._terminal.set_status_handler(self._handle_status)
         self._terminal.set_stats_handler(self._handle_stats)
         self._terminal.set_quit_handler(self._handle_quit)
+        self._terminal.set_live_stats_handler(self._get_live_stats)
     
     # ==================== Command Handlers ====================
     
@@ -160,6 +161,9 @@ class Application:
                         success = await self._bluetooth_manager.send_data(target, message_bytes)
                         if success:
                             sent_count += 1
+                            # Record in connection pool
+                            if self._connection_pool:
+                                await self._connection_pool.record_message_sent(target, len(message_bytes))
                     except Exception:
                         pass
             
@@ -333,6 +337,101 @@ class Application:
         """Handle quit command."""
         await self.stop()
     
+    async def _get_live_stats(self) -> dict:
+        """Get live statistics for dashboard."""
+        stats = {}
+        
+        # Local device info
+        local_address = self._bluetooth_manager.local_address if self._bluetooth_manager else "N/A"
+        local_name = Config.bluetooth.SERVICE_NAME
+        stats["local_device"] = {
+            "address": local_address,
+            "name": local_name,
+            "status": "Running" if (self._bluetooth_manager and self._bluetooth_manager.is_running) else "Stopped",
+        }
+        
+        # Bluetooth status
+        bt_running = self._bluetooth_manager.is_running if self._bluetooth_manager else False
+        bt_connected = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+        
+        # Get connected devices
+        connected_devices = []
+        if self._bluetooth_manager:
+            connected = await self._bluetooth_manager.get_connected_devices()
+            connected_devices = [d.to_dict() for d in connected]
+        
+        stats["bluetooth"] = {
+            "running": bt_running,
+            "connected": bt_connected,
+            "max": Config.bluetooth.MAX_CONCURRENT_CONNECTIONS,
+            "connected_devices": connected_devices,
+        }
+        
+        # GATT status
+        gatt_running = self._gatt_server.is_running if self._gatt_server else False
+        stats["gatt_server"] = {
+            "running": gatt_running,
+        }
+        
+        # Discovery status and stats
+        discovery_status = {
+            "state": "N/A",
+            "network_state": "N/A",
+            "app_devices": 0,
+            "total_devices": 0,
+            "total_scans": 0,
+            "successful_scans": 0,
+            "devices_found": 0,
+            "consecutive_empty_scans": 0,
+            "current_interval": 0.0,
+            "discovered_devices": [],
+            "app_device_list": [],
+        }
+        
+        app_device_list = []
+        if self._discovery:
+            disc_stats = self._discovery.stats
+            app_devices = await self._discovery.get_app_devices()
+            all_devices = await self._discovery.get_all_devices()
+            
+            # Convert to dict format
+            discovered_list = [d.to_dict() for d in all_devices]
+            app_device_list = [d.to_dict() for d in app_devices]
+            
+            discovery_status.update({
+                "state": self._discovery.state.name,
+                "network_state": self._discovery.network_state.name,
+                "app_devices": len(app_devices),
+                "total_devices": len(all_devices),
+                "total_scans": disc_stats.total_scans,
+                "successful_scans": disc_stats.successful_scans,
+                "devices_found": disc_stats.devices_found,
+                "consecutive_empty_scans": disc_stats.consecutive_empty_scans,
+                "current_interval": self._discovery.current_interval,
+                "discovered_devices": discovered_list,
+                "app_device_list": app_device_list,
+            })
+        
+        # Add connected devices list to discovery status for dashboard
+        discovery_status["connected_devices_list"] = connected_devices
+        discovery_status["discovered_app_devices_list"] = app_device_list if self._discovery else []
+        
+        stats["discovery"] = discovery_status
+        
+        # Message stats
+        msg_stats = {}
+        if self._message_handler:
+            handler_stats = self._message_handler.stats
+            msg_stats = {
+                "sent": handler_stats.total_sent,
+                "received": handler_stats.total_received,
+                "forwarded": handler_stats.total_forwarded,
+            }
+        
+        stats["messages"] = msg_stats
+        
+        return stats
+    
     # ==================== Bluetooth Callbacks ====================
     
     async def _on_device_connected(self, device_info):
@@ -344,6 +443,10 @@ class Application:
         
         if self._connection_pool:
             await self._connection_pool.add_connection(device_info.address, device_info)
+            # Update resource monitor connection count
+            if hasattr(self, '_resource_monitor') and self._resource_monitor:
+                count = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+                self._resource_monitor.update_connection_count(count)
     
     async def _on_device_disconnected(self, device_info):
         """Handle device disconnection."""
@@ -354,6 +457,10 @@ class Application:
         
         if self._connection_pool:
             await self._connection_pool.remove_connection(device_info.address)
+            # Update resource monitor connection count
+            if hasattr(self, '_resource_monitor') and self._resource_monitor:
+                count = await self._bluetooth_manager.get_connection_count() if self._bluetooth_manager else 0
+                self._resource_monitor.update_connection_count(count)
     
     async def _on_bluetooth_message(self, address: str, data: dict):
         """Handle incoming Bluetooth message."""
@@ -365,6 +472,10 @@ class Application:
                 message_bytes = data
             else:
                 message_bytes = str(data).encode('utf-8')
+            
+            # Record message received in connection pool
+            if self._connection_pool:
+                await self._connection_pool.record_message_received(address, len(message_bytes))
             
             connected = await self._bluetooth_manager.get_connected_devices() if self._bluetooth_manager else []
             connected_addresses = [d.address for d in connected]
@@ -380,7 +491,9 @@ class Application:
                 forward_data = await self._message_handler.prepare_for_forwarding(message)
                 if forward_data:
                     for target in forward_to:
-                        await self._bluetooth_manager.send_data(target, forward_data)
+                        success = await self._bluetooth_manager.send_data(target, forward_data)
+                        if success and self._connection_pool:
+                            await self._connection_pool.record_message_sent(target, len(forward_data))
         except Exception as e:
             self._terminal.print_error(f"Error processing message: {e}")
     
@@ -502,7 +615,10 @@ class Application:
             local_address=self._bluetooth_manager.local_address if self._bluetooth_manager else None
         )
         
-        # Run terminal input loop
+        # Print some blank lines for dashboard space
+        print("\n" * 10)
+        
+        # Run terminal input loop (includes live dashboard)
         await self._terminal.start()
     
     async def stop(self):
