@@ -85,6 +85,7 @@ class TerminalUI:
         self._dashboard_enabled = True
         self._dashboard_task: Optional[asyncio.Task] = None
         self._dashboard_lines = 0
+        self._dashboard_updating = False  # Prevent concurrent updates
         
         # Check if colors are supported
         if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -439,51 +440,83 @@ class TerminalUI:
         # Initial clear and dashboard display
         await asyncio.sleep(1)  # Wait a bit for app to initialize
         
+        # Track if dashboard has been displayed to avoid duplicate headers
+        dashboard_initialized = False
+        
         while self._running:
             try:
                 if self._on_get_live_stats:
                     stats = await self._safe_callback(self._on_get_live_stats)
                     if stats:
-                        self._update_dashboard(stats)
+                        self._update_dashboard(stats, first_time=not dashboard_initialized)
+                        dashboard_initialized = True
                 
                 await asyncio.sleep(2)  # Update every 2 seconds
                 
             except asyncio.CancelledError:
                 break
-            except Exception:
-                # Silently continue on errors
+            except Exception as e:
+                # Log error but continue
+                if Config.terminal.SHOW_DEBUG:
+                    print(f"\r[DEBUG] Dashboard error: {e}", end="")
                 await asyncio.sleep(2)
     
-    def _update_dashboard(self, stats: dict):
+    def _update_dashboard(self, stats: dict, first_time: bool = False):
         """Update the live dashboard display."""
         if not sys.stdout.isatty():
             return  # Can't update if not a TTY
         
+        # Prevent concurrent updates
+        if self._dashboard_updating:
+            return
+        
+        self._dashboard_updating = True
+        
         try:
-            # Save cursor position
-            sys.stdout.write("\033[s")
-            
-            # Move to top (after banner area, line 6)
-            sys.stdout.write("\033[6;1H")
-            
-            # Clear from here to end of screen
-            sys.stdout.write("\033[J")
-            
-            # Build dashboard content
+            # Build dashboard content first
             lines = self._build_dashboard(stats)
             self._dashboard_lines = len(lines)
             
-            # Print dashboard
+            # Save cursor position
+            sys.stdout.write("\033[s")
+            
+            # Move to start of dashboard area (after banner, typically around line 6-7)
+            # Use a fixed position that accounts for the banner
+            dashboard_start_line = 7
+            sys.stdout.write(f"\033[{dashboard_start_line};1H")
+            
+            # Clear from current position to end of screen
+            # This ensures we remove any previous dashboard content
+            sys.stdout.write("\033[J")
+            
+            # Print dashboard lines
             for line in lines:
                 sys.stdout.write(line + "\n")
+            
+            # Clear any remaining lines below dashboard to prevent artifacts
+            # Calculate how many lines we need to clear (dashboard is typically ~20 lines)
+            remaining_lines = max(0, 25 - len(lines))  # Clear up to 25 lines total
+            if remaining_lines > 0:
+                for _ in range(remaining_lines):
+                    sys.stdout.write("\033[K\n")  # Clear line and move down
+            
+            # Ensure we're at the right position for input prompt
+            # Move to a fixed position below dashboard
+            input_line = dashboard_start_line + len(lines) + 2
+            sys.stdout.write(f"\033[{input_line};1H")
             
             # Restore cursor position (will be at input prompt)
             sys.stdout.write("\033[u")
             sys.stdout.flush()
             
-        except Exception:
-            # If ANSI codes fail, just print normally
+        except Exception as e:
+            # If ANSI codes fail, log error but don't crash
+            # Only log if debug is enabled to avoid spam
+            if Config.terminal.SHOW_DEBUG:
+                print(f"\r[DEBUG] Dashboard update error: {e}", end="")
             pass
+        finally:
+            self._dashboard_updating = False
     
     def _build_dashboard(self, stats: dict) -> List[str]:
         """Build dashboard content lines."""
