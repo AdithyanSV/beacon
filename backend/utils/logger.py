@@ -129,7 +129,9 @@ def setup_logging() -> None:
     # Add handler to root logger
     root_logger.addHandler(console_handler)
     
-    # Add file handler if configured
+    # Add file handler if configured (optional - disabled by default for no persistence)
+    # NOTE: File logging is the ONLY persistence mechanism in the application.
+    # All other data (caches, device info, messages) is in-memory only.
     if Config.log.LOG_FILE:
         file_handler = logging.FileHandler(Config.log.LOG_FILE)
         file_handler.setLevel(log_level)

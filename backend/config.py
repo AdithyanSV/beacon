@@ -119,11 +119,18 @@ class SecurityConfig:
 
 
 class LogConfig:
-    """Logging configuration."""
+    """
+    Logging configuration.
+    
+    NOTE: LOG_FILE is optional and disabled by default.
+    The application does NOT persist any data to disk by default.
+    All caches and data structures are in-memory only.
+    """
     
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
     LOG_FORMAT = os.getenv("LOG_FORMAT", "text")
-    LOG_FILE = os.getenv("LOG_FILE", None)  # Optional file path
+    # Optional file path - set to None to disable file logging (default: no persistence)
+    LOG_FILE = os.getenv("LOG_FILE", None)  # None = no file logging, all in-memory
     
     # Security logging
     LOG_SECURITY_EVENTS = get_bool_env("LOG_SECURITY_EVENTS", True)

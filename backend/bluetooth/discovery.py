@@ -112,6 +112,10 @@ class DeviceDiscovery:
     
     Fixed: Deduplication happens in the scan callback to avoid
     processing the same device multiple times per scan.
+    
+    IMPORTANT: All device tracking is in-memory only. No persistence to disk.
+    - Discovered devices are stored in memory dictionaries
+    - All device information is lost when the application stops
     """
     
     def __init__(self, bluetooth_manager=None):

@@ -37,6 +37,9 @@ class RoutingStats:
 class ThreadSafeCache:
     """
     Thread-safe wrapper around TTLCache for message deduplication.
+    
+    IMPORTANT: This cache is in-memory only. No data is persisted to disk.
+    All cache entries are lost when the application stops.
     """
     
     def __init__(self, maxsize: int, ttl: float):
@@ -104,6 +107,11 @@ class MeshRouter:
     Thread-safe mesh router for message propagation.
     
     Implements flooding-based routing with deduplication and loop prevention.
+    
+    IMPORTANT: All routing data is in-memory only. No persistence to disk.
+    - Message cache is in-memory (TTLCache)
+    - Routing statistics are in-memory
+    - All data is lost when the application stops
     """
     
     def __init__(self, local_device_id: str = None):
